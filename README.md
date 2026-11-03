@@ -1,5 +1,7 @@
 # Camera Finder
 
+**[⬇ Download for Windows (latest installer)](https://github.com/saw-bean/camera-finder/releases/latest/download/CameraFinder-Setup.exe)** · [All releases](https://github.com/saw-bean/camera-finder/releases)
+
 A Windows tool for security installers and service technicians. Plug into the site network, press **Scan**, and it lists every camera, door controller and other device on the cable — **any brand** — with its IP, manufacturer and web page. Click **Open web page** to go straight to the device's login page.
 
 It works at Layer 2 (Ethernet/ARP), which every networked device must use, so it does not depend on each brand's own discovery protocol. It also finds devices whose IP is in a range you don't know: it hears them on the wire, temporarily joins that range, and sweeps it.
@@ -19,7 +21,7 @@ The temporary IPs are added with `skipassource`, so the laptop's normal traffic 
 
 ## Install
 
-1. Download `CameraFinder-Setup-x.y.z.exe` from the [Releases](../../releases) page (or from the latest **Actions** build, under *Artifacts*).
+1. [Download the latest installer](https://github.com/saw-bean/camera-finder/releases/latest/download/CameraFinder-Setup.exe) (or pick a version from the [Releases](../../releases) page).
 2. Run it. The .NET runtime is included; nothing else is required.
 3. **Optional but recommended:** install [Npcap](https://npcap.com/#download) (already installed if you have Wireshark). Without it, step 1 (passive listening) is off, so the app only finds devices in ranges your laptop is already in, plus devices that answer ONVIF/UPnP.
 

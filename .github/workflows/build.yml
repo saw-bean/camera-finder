@@ -67,6 +67,13 @@ jobs:
             dist/*.exe
             publish/CameraFinder.exe
 
+      - name: Fixed-name copy for the README "latest" download link
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ steps.ver.outputs.version }}
+        run: Copy-Item "dist/CameraFinder-Setup-$env:APP_VERSION.exe" "dist/CameraFinder-Setup.exe"
+
       - name: Attach to release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
