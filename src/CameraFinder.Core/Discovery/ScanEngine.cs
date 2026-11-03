@@ -23,6 +23,12 @@ public sealed class ScanOptions
     /// <summary>Maximum number of extra ranges to join automatically.</summary>
     public int MaxExtraRanges { get; init; } = 6;
 
+    /// <summary>
+    /// Also ask with manufacturer discovery protocols (Hikvision SADP, Dahua, Hanwha, Bosch, i-PRO, Vivotek, Sony,
+    /// Ubiquiti, Axis/Arecont mDNS). These are read-only "who is there?" requests, allowed in safe mode too.
+    /// </summary>
+    public bool VendorProtocols { get; init; } = true;
+
     /// <summary>Hide the laptop itself (Windows answers its own SSDP searches). Only turned off in tests.</summary>
     public bool HideOwnAddresses { get; init; } = true;
 }
@@ -211,6 +217,19 @@ public sealed class ScanEngine
                 var hit = SsdpProbe.Parse(from.Address, data);
                 if (hit != null) Merge(hit, DiscoverySource.Ssdp);
             }, ct));
+            if (options.VendorProtocols)
+            {
+                foreach (var protocol in VendorProbes.All)
+                {
+                    tasks.Add(MulticastProbe.RunVendorAsync(src, protocol, options.ProbeTime, (from, data) =>
+                    {
+                        ProbeHit? hit;
+                        try { hit = protocol.Parse(from.Address, data); }
+                        catch (Exception) { return; } // malformed reply: ignore
+                        if (hit != null) Merge(hit, DiscoverySource.Vendor);
+                    }, ct));
+                }
+            }
         }
         try { await Task.WhenAll(tasks); }
         catch (OperationCanceledException) { throw; }
@@ -235,6 +254,13 @@ public sealed class ScanEngine
             d.Model ??= hit.Model;
             d.Name ??= hit.Name;
             d.Server ??= hit.Server;
+            if (hit.Camera) d.CameraProtocol = true;
+            if (hit.Protocol != null) d.Protocols.Add(hit.Protocol);
+            if (hit.Mac != null && d.Mac == null)
+            {
+                d.Mac = hit.Mac;
+                d.Vendor ??= _oui.Lookup(hit.Mac);
+            }
             if (hit.Manufacturer != null && d.Vendor == null) d.Vendor = hit.Manufacturer;
         }
         if (hit.DescriptionUrl != null) _ssdpDescriptions.TryAdd(hit.Ip, hit.DescriptionUrl);

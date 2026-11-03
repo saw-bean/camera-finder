@@ -28,6 +28,15 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR
 OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGE.
 
+## UniversalScanner (reference only, no code included)
+
+The manufacturer discovery protocols in `src/CameraFinder.Core/Discovery/VendorProbes.cs` (Hikvision SADP,
+Dahua, Hanwha, Bosch, i-PRO/Panasonic, Vivotek, Sony, Ubiquiti, Axis/Arecont mDNS) were written for Camera
+Finder. Their packet layouts (ports, magic numbers, field offsets) were learned from UniversalScanner by
+Julien Blitte, https://github.com/julienblitte/UniversalScanner, which is licensed under the GNU LGPL v3.
+No UniversalScanner source code is included in this project. Thanks to its author for documenting these
+protocols.
+
 ## Npcap (not included)
 
 Passive listening uses Npcap if the user has installed it separately (https://npcap.com). Npcap is not

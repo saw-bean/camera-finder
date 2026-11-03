@@ -23,7 +23,7 @@ public static class CsvExporter
                 d.Description,
                 string.Join(" ", d.OpenPorts),
                 d.WebUrl ?? "",
-                d.Sources.ToString(),
+                d.FoundBy,
                 ""));
         }
         return sb.ToString();

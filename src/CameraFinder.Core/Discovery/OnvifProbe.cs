@@ -4,8 +4,12 @@ using System.Xml;
 
 namespace CameraFinder.Core.Discovery;
 
-/// <summary>Result of an ONVIF WS-Discovery or SSDP reply.</summary>
-public sealed record ProbeHit(IPAddress Ip, string? Model, string? Name, string? Manufacturer, string? Server, string? DescriptionUrl);
+/// <summary>Result of an ONVIF WS-Discovery, SSDP or manufacturer discovery reply.</summary>
+public sealed record ProbeHit(
+    IPAddress Ip, string? Model, string? Name, string? Manufacturer, string? Server, string? DescriptionUrl,
+    string? Mac = null,        // reported by the device itself (manufacturer protocols)
+    bool Camera = false,       // the protocol only exists on cameras / recorders
+    string? Protocol = null);  // manufacturer protocol name, shown in "Found by"
 
 /// <summary>ONVIF WS-Discovery: the standard almost every professional IP camera answers, whatever the brand.</summary>
 public static class OnvifProbe

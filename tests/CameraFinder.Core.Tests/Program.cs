@@ -219,6 +219,188 @@ static class Tests
         Assert.Equal("WV-X1571 LN", model);
     }
 
+    // ---------- Manufacturer discovery protocols ----------
+    static VendorProtocol Proto(string name) => VendorProbes.All.First(p => p.Name == name);
+    static readonly IPAddress From = IPAddress.Parse("192.168.1.99");
+
+    public static void TestVendorParsersIgnoreOwnRequestsAndGarbage()
+    {
+        var rnd = new Random(42);
+        foreach (var p in VendorProbes.All)
+        {
+            Assert.Equal(null, p.Parse(From, p.Payload()), $"{p.Name} ignores its own request");
+            for (int i = 0; i < 300; i++)
+            {
+                var junk = new byte[rnd.Next(0, 400)];
+                rnd.NextBytes(junk);
+                if (junk.Length > 0 && rnd.Next(3) == 0) junk[0] = p.Payload()[0]; // look a bit like the real thing
+                try { p.Parse(From, junk); }
+                catch (Exception ex) { throw new Exception($"{p.Name} threw on junk: {ex.GetType().Name} {ex.Message}"); }
+            }
+        }
+    }
+
+    public static void TestParseHikvisionSadp()
+    {
+        string xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ProbeMatch><Uuid>X</Uuid><Types>inquiry</Types>" +
+                     "<DeviceType>139</DeviceType><DeviceDescription>DS-2CD2143G2-I</DeviceDescription>" +
+                     "<DeviceSN>DS-2CD2143G2-I20220101AAWRJ12345678</DeviceSN><MAC>44-19-b6-01-02-03</MAC>" +
+                     "<IPv4Address>192.0.0.64</IPv4Address><Activated>false</Activated></ProbeMatch>";
+        var hit = Proto("Hikvision SADP").Parse(From, Encoding.UTF8.GetBytes(xml))!;
+        Assert.Equal("192.0.0.64", hit.Ip.ToString(), "IP from payload, not sender");
+        Assert.Equal("44:19:B6:01:02:03", hit.Mac);
+        Assert.True(hit.Model!.StartsWith("DS-2CD2143G2-I") && hit.Model.Contains("NOT ACTIVATED"), "model + activation: " + hit.Model);
+        Assert.True(hit.Camera, "camera");
+        Assert.Equal("Hikvision SADP", hit.Protocol);
+    }
+
+    public static void TestParseDahuaV1()
+    {
+        var mac = Encoding.ASCII.GetBytes("38:af:29:11:22:33");
+        var model = Encoding.ASCII.GetBytes("IPC-HDW2431T");
+        var extra = Encoding.ASCII.GetBytes("SerialNo:5J0123PAZ\r\n");
+        var d = new byte[0x78 + mac.Length + model.Length + extra.Length];
+        d[0] = 0xb3;
+        d[2] = (byte)(mac.Length + model.Length);
+        BitConverter.GetBytes((ushort)extra.Length).CopyTo(d, 0x14);
+        new byte[] { 192, 168, 1, 108 }.CopyTo(d, 0x38);
+        mac.CopyTo(d, 0x78); model.CopyTo(d, 0x78 + mac.Length); extra.CopyTo(d, 0x78 + mac.Length + model.Length);
+        var hit = Proto("Dahua").Parse(From, d)!;
+        Assert.Equal("192.168.1.108", hit.Ip.ToString());
+        Assert.Equal("38:AF:29:11:22:33", hit.Mac);
+        Assert.Equal("IPC-HDW2431T", hit.Model);
+    }
+
+    public static void TestParseDahuaV2()
+    {
+        var body = Encoding.UTF8.GetBytes("{\"method\":\"client.notifyDevInfo\",\"params\":{\"deviceInfo\":{\"DeviceType\":\"N842B3\"," +
+            "\"Vendor\":\"Lorex\",\"IPv4Address\":{\"IPAddress\":\"10.20.0.7\",\"SubnetMask\":\"255.255.255.0\"},\"mac\":\"9c:8e:cd:aa:bb:cc\"}}}\n");
+        var d = new byte[0x20 + body.Length];
+        BitConverter.GetBytes(0x20u).CopyTo(d, 0);
+        Encoding.ASCII.GetBytes("DHIP").CopyTo(d, 4);
+        BitConverter.GetBytes((uint)body.Length).CopyTo(d, 0x10);
+        BitConverter.GetBytes((uint)body.Length).CopyTo(d, 0x18);
+        body.CopyTo(d, 0x20);
+        var hit = Proto("Dahua DHIP").Parse(From, d)!;
+        Assert.Equal("10.20.0.7", hit.Ip.ToString());
+        Assert.Equal("N842B3", hit.Model);
+        Assert.Equal("Lorex", hit.Manufacturer);
+        Assert.Equal("9C:8E:CD:AA:BB:CC", hit.Mac);
+    }
+
+    public static void TestParseHanwha()
+    {
+        var d = new byte[0x106];
+        d[0] = 0x0b;
+        Encoding.ASCII.GetBytes("00:09:18:4A:5B:6C").CopyTo(d, 0x13);
+        Encoding.ASCII.GetBytes("192.168.1.100").CopyTo(d, 0x25);
+        Encoding.ASCII.GetBytes("XNV-6080R").CopyTo(d, 0x6D);
+        var hit = Proto("Hanwha").Parse(From, d)!;
+        Assert.Equal("192.168.1.100", hit.Ip.ToString());
+        Assert.Equal("XNV-6080R", hit.Model);
+        Assert.Equal("00:09:18:4A:5B:6C", hit.Mac);
+    }
+
+    public static void TestParseBosch()
+    {
+        var d = new byte[32];
+        new byte[] { 0x99, 0x39, 0xa4, 0x27 }.CopyTo(d, 0);
+        new byte[] { 0x00, 0x07, 0x5f, 0x01, 0x02, 0x03 }.CopyTo(d, 8);
+        new byte[] { 192, 168, 0, 1 }.CopyTo(d, 0x10);
+        var hit = Proto("Bosch").Parse(From, d)!;
+        Assert.Equal("192.168.0.1", hit.Ip.ToString());
+        Assert.Equal("00:07:5F:01:02:03", hit.Mac);
+
+        var xml = "<unit><friendlyName>FLEXIDOME IP 5000i</friendlyName><unitIPAddress>10.1.1.20</unitIPAddress><physAddress>00-07-5f-aa-bb-cc</physAddress></unit>";
+        var x = Proto("Bosch").Parse(From, Encoding.UTF8.GetBytes(xml))!;
+        Assert.Equal("10.1.1.20", x.Ip.ToString());
+        Assert.Equal("FLEXIDOME IP 5000i", x.Model);
+    }
+
+    public static void TestParsePanasonic()
+    {
+        var d = new List<byte>(new byte[53]);
+        for (int i = 0; i < 6; i++) d[6 + i] = new byte[] { 0x00, 0x80, 0x45, 0x11, 0x22, 0x33 }[i];
+        void Tlv(int key, byte[] v) { d.Add((byte)(key >> 8)); d.Add((byte)key); d.Add((byte)(v.Length >> 8)); d.Add((byte)v.Length); d.AddRange(v); }
+        Tlv(0x20, new byte[] { 192, 168, 0, 10 });
+        Tlv(0xa7, Encoding.ASCII.GetBytes("WV-S2136"));
+        d.AddRange(new byte[4]);
+        var hit = Proto("i-PRO/Panasonic").Parse(From, d.ToArray())!;
+        Assert.Equal("192.168.0.10", hit.Ip.ToString());
+        Assert.Equal("WV-S2136", hit.Model);
+        Assert.Equal("00:80:45:11:22:33", hit.Mac);
+    }
+
+    public static void TestParseVivotek()
+    {
+        var d = new List<byte> { 0x01, 0x4a, 0x5d, 0x8f, 0x1c };
+        d.AddRange(new byte[] { 0x02, 6, 0x00, 0x02, 0xd1, 0x01, 0x02, 0x03 });
+        d.AddRange(new byte[] { 0x03, 4, 192, 168, 0, 99 });
+        d.AddRange(new byte[] { 0x04, 1 });
+        var m = Encoding.ASCII.GetBytes("FD9187-HT");
+        d.Add(0x09); d.Add((byte)m.Length); d.AddRange(m);
+        var hit = Proto("Vivotek").Parse(From, d.ToArray())!;
+        Assert.Equal("192.168.0.99", hit.Ip.ToString());
+        Assert.Equal("FD9187-HT", hit.Model);
+        Assert.Equal("00:02:D1:01:02:03", hit.Mac);
+    }
+
+    public static void TestParseSony()
+    {
+        var d = new List<byte> { 0x02 };
+        foreach (var line in new[] { "MODEL:SNC-VB770", "MAC:08:00:46:aa:bb:cc", "IPADR:192.168.0.100" })
+        { d.AddRange(Encoding.ASCII.GetBytes(line)); d.Add(0xff); }
+        d.Add(0x03);
+        var hit = Proto("Sony").Parse(From, d.ToArray())!;
+        Assert.Equal("192.168.0.100", hit.Ip.ToString());
+        Assert.Equal("SNC-VB770", hit.Model);
+        Assert.Equal("08:00:46:AA:BB:CC", hit.Mac, "MAC with colons kept whole");
+    }
+
+    public static void TestParseUbiquiti()
+    {
+        var body = new List<byte>();
+        void Tlv(byte t, byte[] v) { body.Add(t); body.Add((byte)(v.Length >> 8)); body.Add((byte)v.Length); body.AddRange(v); }
+        Tlv(0x02, new byte[] { 0x24, 0x5a, 0x4c, 0x01, 0x02, 0x03, 10, 0, 0, 50 });
+        Tlv(0x0b, Encoding.ASCII.GetBytes("Front-Door-Cam"));
+        Tlv(0x0c, Encoding.ASCII.GetBytes("UVC G4 Bullet"));
+        var d = new List<byte> { 0x01, 0x00, (byte)(body.Count >> 8), (byte)body.Count };
+        d.AddRange(body);
+        var hit = Proto("Ubiquiti").Parse(From, d.ToArray())!;
+        Assert.Equal("10.0.0.50", hit.Ip.ToString());
+        Assert.Equal("24:5A:4C:01:02:03", hit.Mac);
+        Assert.Equal("UVC G4 Bullet", hit.Model);
+        Assert.Equal("Front-Door-Cam", hit.Name);
+        Assert.True(hit.Camera, "UVC is a camera");
+    }
+
+    public static void TestParseMdnsAxis()
+    {
+        var d = new List<byte> { 0, 0, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0 }; // response, 1 answer
+        int serviceAt = d.Count;
+        foreach (var label in "_axis-video._tcp.local".Split('.')) { d.Add((byte)label.Length); d.AddRange(Encoding.ASCII.GetBytes(label)); }
+        d.Add(0);
+        d.AddRange(new byte[] { 0, 12, 0, 1, 0, 0, 0x11, 0x94 }); // PTR IN ttl
+        var inst = Encoding.UTF8.GetBytes("AXIS P3245-V - ACCC8E123456");
+        var rdata = new List<byte> { (byte)inst.Length };
+        rdata.AddRange(inst);
+        rdata.Add((byte)(0xC0 | (serviceAt >> 8))); rdata.Add((byte)serviceAt); // compressed pointer to the service name
+        d.Add((byte)(rdata.Count >> 8)); d.Add((byte)rdata.Count);
+        d.AddRange(rdata);
+        var hit = Proto("mDNS (Axis/Arecont)").Parse(IPAddress.Parse("192.168.0.90"), d.ToArray())!;
+        Assert.Equal("192.168.0.90", hit.Ip.ToString());
+        Assert.Equal("AXIS P3245-V", hit.Model);
+        Assert.Equal("AC:CC:8E:12:34:56", hit.Mac);
+    }
+
+    public static void TestFoundByListsProtocols()
+    {
+        var d = new Device(IPAddress.Parse("10.0.0.5")) { Sources = DiscoverySource.ArpSweep | DiscoverySource.Vendor, CameraProtocol = true };
+        d.Protocols.Add("Hikvision SADP");
+        Assert.Equal("ArpSweep, Hikvision SADP", d.FoundBy);
+        Assert.Equal(DeviceKind.Camera, d.Kind);
+    }
+
     public static void TestExtractTitle()
     {
         Assert.Equal("Network Camera &", DeviceEnricher.ExtractTitle("<html><head><TITLE>\n Network   Camera &amp; </TITLE>"));
@@ -334,6 +516,51 @@ static class Tests
             for (int i = 0; i < 3; i++) await u.SendAsync(new byte[] { 1, 2, 3 }, 3, new IPEndPoint(IPAddress.Broadcast, 9));
         await listen;
         Assert.True(seen.Any(o => o.Ip.Equals(local) && o.Mac != null), $"own broadcast captured ({seen.Count} observations)");
+    }
+
+    [Live]
+    public static async Task TestVendorProbeOverRealSockets()
+    {
+        var local = LocalIPv4();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var fake = new UdpClient();
+        fake.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+        try { fake.Client.Bind(new IPEndPoint(IPAddress.Any, 2380)); } catch (SocketException) { throw new SkipException("port 2380 busy"); }
+        var reply = new List<byte> { 0x02 };
+        foreach (var line in new[] { "MODEL:SNC-FAKE", $"IPADR:{local}" }) { reply.AddRange(Encoding.ASCII.GetBytes(line)); reply.Add(0xff); }
+        reply.Add(0x03);
+        var responder = Task.Run(async () =>
+        {
+            try
+            {
+                while (true)
+                {
+                    var r = await fake.ReceiveAsync(cts.Token);
+                    if (r.Buffer.Length > 0 && r.Buffer[0] == 0x02 && Encoding.ASCII.GetString(r.Buffer).Contains("ENQ:allinfo"))
+                        await fake.SendAsync(reply.ToArray(), reply.Count, r.RemoteEndPoint);
+                }
+            }
+            catch (OperationCanceledException) { }
+        });
+
+        var hits = new List<ProbeHit>();
+        var sony = VendorProbes.All.First(p => p.Name == "Sony");
+        // Broadcast may not loop back on every host; send the same request unicast to ourselves as well.
+        var unicast = sony with { Broadcast = false, Multicast = null };
+        await Task.WhenAll(
+            MulticastProbe.RunVendorAsync(local, sony, TimeSpan.FromSeconds(2), (f, data) => { var h = sony.Parse(f.Address, data); if (h != null) lock (hits) hits.Add(h); }, cts.Token),
+            Task.Run(async () =>
+            {
+                using var u = new UdpClient(new IPEndPoint(local, 0));
+                var req = unicast.Payload();
+                await u.SendAsync(req, req.Length, new IPEndPoint(local, 2380));
+                var r = await u.ReceiveAsync(cts.Token);
+                var h = sony.Parse(r.RemoteEndPoint.Address, r.Buffer);
+                if (h != null) lock (hits) hits.Add(h);
+            }));
+        cts.Cancel();
+        try { await responder; } catch { }
+        Assert.True(hits.Any(h => h.Model == "SNC-FAKE" && h.Ip.Equals(local)), $"fake Sony camera answered ({hits.Count} hits)");
     }
 
     [Live]

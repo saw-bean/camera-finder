@@ -11,7 +11,7 @@ It works at Layer 2 (Ethernet/ARP), which every networked device must use, so it
 | Step | What the app does |
 |---|---|
 | 1. Listen | Captures ARP, DHCP and broadcast/multicast traffic (needs Npcap) to learn which IP ranges are on the cable. |
-| 2. Probe | Sends ONVIF (WS-Discovery) and UPnP (SSDP) searches so quiet cameras answer. |
+| 2. Probe | Sends ONVIF (WS-Discovery) and UPnP (SSDP) searches, plus the manufacturers' own "finder tool" protocols (see below), so quiet cameras answer. |
 | 3. Join ranges | For each new range, adds a temporary IP to the laptop (e.g. `10.0.5.251`). Windows checks the address is free first; if another device uses it, another is tried. |
 | 4. ARP sweep | ARPs every address in each range. Every device must answer ARP, even if it ignores ping. |
 | 5. Details | Looks up the manufacturer from the MAC (offline IEEE database), checks ports 80/443/554/8000/8080, reads the web page title and ONVIF/UPnP model. |
@@ -45,6 +45,24 @@ To publish an update (maintainers): push a version tag, e.g. `git tag v0.2.0 && 
 6. Close the app (or press **Remove temporary IPs**) when you're done.
 
 **Safe mode** only listens and sends discovery probes. It never changes the laptop's network settings and never sweeps. Use it on sensitive client networks.
+
+### Manufacturer discovery protocols
+
+Many cameras answer their maker's own finder tool even when ONVIF is off, and often even when their IP is in a different range than the laptop's (they reply by broadcast/multicast). Camera Finder speaks these protocols, focusing on brands common in Canada:
+
+| Protocol | Brands |
+|---|---|
+| Hikvision SADP | Hikvision, HiLook and Hikvision OEMs — also flags cameras that are **not activated** yet |
+| Dahua (port 5050 and DHIP 37810) | Dahua, Lorex, Amcrest and Dahua OEMs |
+| Hanwha | Hanwha Vision / Samsung Wisenet |
+| Bosch | Bosch IP cameras and encoders |
+| i-PRO / Panasonic | i-PRO, Panasonic |
+| Vivotek | Vivotek |
+| Sony | Sony IP cameras |
+| Ubiquiti | UniFi Protect cameras (and other UniFi gear) |
+| mDNS / Bonjour | Axis, Arecont Vision |
+
+Avigilon, Uniview, Hanwha's newer models and most others are found through ONVIF, SSDP and the ARP sweep. These are read-only "who is there?" requests, so they also run in safe mode. Packet layouts were worked out with help from [UniversalScanner](https://github.com/julienblitte/UniversalScanner) by Julien Blitte; Camera Finder's implementation is its own (see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
 
 ## Limits
 

@@ -252,7 +252,7 @@ public sealed class MainForm : Form
         item.SubItems[3].Text = d.Description;
         item.SubItems[4].Text = d.Mac ?? "";
         item.SubItems[5].Text = string.Join(" ", d.OpenPorts);
-        item.SubItems[6].Text = d.Sources.ToString();
+        item.SubItems[6].Text = d.FoundBy;
         item.ForeColor = d.Kind == DeviceKind.Camera ? Color.DarkBlue : SystemColors.WindowText;
         UpdateButtons();
     }
