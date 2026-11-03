@@ -30,7 +30,7 @@ public static class VendorProbes
     public static readonly IReadOnlyList<VendorProtocol> All = new[]
     {
         new VendorProtocol("Hikvision SADP", 37020, 37020, IPAddress.Parse("239.255.255.250"), false, HikvisionProbe, ParseHikvision),
-        new VendorProtocol("Dahua", 5050, 5050, null, true, () => (byte[])DahuaV1Request.Clone(), ParseDahuaV1),
+        new VendorProtocol("Dahua", 5050, 5050, null, true, DahuaV1Probe, ParseDahuaV1),
         new VendorProtocol("Dahua DHIP", 37810, 37810, IPAddress.Parse("239.255.255.251"), true, DahuaV2Probe, ParseDahuaV2),
         new VendorProtocol("Hanwha", 7701, 7711, null, true, HanwhaProbe, ParseHanwha),
         new VendorProtocol("Bosch", 1757, 1758, null, true, BoschProbe, ParseBosch),
@@ -59,7 +59,7 @@ public static class VendorProbes
 
     // ------------------------------------------------------------------ Dahua v1 (port 5050) - also Lorex, Amcrest, OEMs
 
-    private static readonly byte[] DahuaV1Request =
+    private static byte[] DahuaV1Probe() => new byte[]
     {
         0xa3, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
