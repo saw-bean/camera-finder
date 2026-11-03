@@ -23,9 +23,9 @@ The temporary IPs are added with `skipassource`, so the laptop's normal traffic 
 
 1. [Download the latest installer](https://github.com/saw-bean/camera-finder/releases/latest/download/CameraFinder-Setup.exe) (or pick a version from the [Releases](../../releases) page).
 2. Run it. The .NET runtime is included; nothing else is required.
-3. **Optional but recommended:** install [Npcap](https://npcap.com/#download) (already installed if you have Wireshark). Without it, step 1 (passive listening) is off, so the app only finds devices in ranges your laptop is already in, plus devices that answer ONVIF/UPnP.
+3. **Npcap (recommended):** keep *Download and install Npcap* ticked. Setup downloads the official installer from npcap.com (checked against a pinned SHA-256) and starts it; click through Npcap's own wizard. The option is hidden if Npcap is already installed (e.g. with Wireshark). Without Npcap, step 1 (passive listening) is off, so the app only finds devices in ranges your laptop is already in, plus devices that answer ONVIF/UPnP. Offline? Setup offers the [download page](https://npcap.com/#download) instead.
 
-> Npcap's free licence allows up to 5 computers and does not allow it to be bundled in another installer, which is why setup only offers the download link.
+> Npcap's free licence allows up to 5 computers and does not allow it to be bundled inside another installer, which is why setup downloads it from npcap.com rather than including it. Nothing enforces the 5-computer limit; staying within it is up to you (more needs an [Npcap OEM](https://npcap.com/oem/) licence).
 
 Requirements: Windows 10 version 2004 or later / Windows 11, administrator rights (to add temporary IPs).
 

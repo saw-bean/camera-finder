@@ -1,11 +1,16 @@
 ; Inno Setup script for Camera Finder.
 ; Build: iscc /DAppVersion=0.1.0 /DSourceDir=..\publish installer\CameraFinder.iss
 ; The app is published self-contained, so the .NET runtime is included - nothing else to install.
-; Npcap (optional, for passive listening) cannot legally be bundled, so setup offers to open its download page.
+; Npcap (optional, for passive listening) cannot legally be bundled (free licence), so setup can download the
+; official installer from npcap.com and start it; the user accepts Npcap's own licence in its wizard.
+; To move to a newer Npcap: update NpcapVersion and NpcapSha256 (sha256 of https://npcap.com/dist/npcap-<ver>.exe).
 
 #ifndef AppVersion
   #define AppVersion "0.1.0"
 #endif
+#define NpcapVersion "1.90"
+#define NpcapSha256 "682b57e1c05ef375931975c9d6ded40888f4bfdf9f4b11571e654f962f1199b6"
+
 #ifndef SourceDir
   #define SourceDir "..\publish"
 #endif
@@ -32,6 +37,7 @@ LicenseFile=..\LICENSE
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"
+Name: "npcap"; Description: "Download and install Npcap {#NpcapVersion} (recommended - finds devices in unknown IP ranges; free for up to 5 computers)"; GroupDescription: "Optional components:"; Check: not NpcapInstalled
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -50,24 +56,74 @@ Filename: "{app}\CameraFinder.exe"; Description: "Start Camera Finder"; Flags: n
 Type: filesandordirs; Name: "{commonappdata}\CameraFinder"
 
 [Code]
+var
+  DownloadPage: TDownloadWizardPage;
+  NpcapDownloaded: Boolean;
+  NpcapFailed: Boolean;
+
 function NpcapInstalled(): Boolean;
 begin
   Result := FileExists(ExpandConstant('{sys}\Npcap\wpcap.dll'));
 end;
 
-procedure CurStepChanged(CurStep: TSetupStep);
+function OnDownloadProgress(const Url, FileName: String; const Progress, ProgressMax: Int64): Boolean;
+begin
+  Result := True;
+end;
+
+procedure InitializeWizard();
+begin
+  DownloadPage := CreateDownloadPage('Downloading Npcap', 'Downloading the official Npcap installer from npcap.com...', @OnDownloadProgress);
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (CurPageID = wpReady) and WizardIsTaskSelected('npcap') and (not NpcapInstalled()) then
+  begin
+    DownloadPage.Clear;
+    DownloadPage.Add('https://npcap.com/dist/npcap-{#NpcapVersion}.exe', 'npcap-setup.exe', '{#NpcapSha256}');
+    DownloadPage.Show;
+    try
+      try
+        DownloadPage.Download;
+        NpcapDownloaded := True;
+      except
+        NpcapFailed := True;
+        Log('Npcap download failed: ' + GetExceptionMessage);
+      end;
+    finally
+      DownloadPage.Hide;
+    end;
+  end;
+end;
+
+procedure OpenNpcapPage();
 var
   ErrorCode: Integer;
 begin
-  if (CurStep = ssPostInstall) and (not WizardSilent()) and (not NpcapInstalled()) then
+  ShellExec('open', 'https://npcap.com/#download', '', '', SW_SHOWNORMAL, ewNoWait, ErrorCode);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  if (CurStep <> ssPostInstall) or WizardSilent() then Exit;
+
+  if NpcapDownloaded then
   begin
-    if MsgBox('Optional: Npcap is not installed.' + #13#10 + #13#10 +
+    WizardForm.StatusLabel.Caption := 'Waiting for the Npcap installer to finish...';
+    if not Exec(ExpandConstant('{tmp}\npcap-setup.exe'), '', '', SW_SHOW, ewWaitUntilTerminated, ResultCode) then
+      NpcapFailed := True;
+  end;
+
+  if NpcapFailed and (not NpcapInstalled()) then
+  begin
+    if MsgBox('Npcap could not be downloaded or installed (no internet?).' + #13#10 + #13#10 +
               'Camera Finder works without it, but with Npcap it can also listen to the network ' +
               'and find devices in IP ranges you do not know yet.' + #13#10 + #13#10 +
-              'Npcap is free for up to 5 computers. (It is already installed if you have Wireshark.)' + #13#10 + #13#10 +
               'Open the Npcap download page now?', mbConfirmation, MB_YESNO) = IDYES then
-    begin
-      ShellExec('open', 'https://npcap.com/#download', '', '', SW_SHOWNORMAL, ewNoWait, ErrorCode);
-    end;
+      OpenNpcapPage();
   end;
 end;
