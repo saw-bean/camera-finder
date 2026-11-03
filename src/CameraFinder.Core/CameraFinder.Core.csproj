@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>CameraFinder.Core</RootNamespace>
+    <!-- No NuGet dependencies on purpose: everything uses the .NET base library or OS APIs. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\oui.tsv.gz" LogicalName="CameraFinder.Core.oui.tsv.gz" />
+  </ItemGroup>
+
+</Project>

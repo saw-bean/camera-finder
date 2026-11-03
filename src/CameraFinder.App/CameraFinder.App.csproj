@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>CameraFinder</AssemblyName>
+    <RootNamespace>CameraFinder.App</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>0.1.0</Version>
+    <Product>Camera Finder</Product>
+    <Description>Finds cameras and controllers of any brand on a local network and opens their web pages.</Description>
+    <!-- Lets the project build on non-Windows machines too (CI or dev). -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CameraFinder.Core\CameraFinder.Core.csproj" />
+  </ItemGroup>
+
+</Project>

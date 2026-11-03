@@ -1,0 +1,74 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to attach the installer to a release on version tags
+
+jobs:
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Install libpcap (for the capture test)
+        run: sudo apt-get install -y libpcap0.8
+      - name: Unit tests
+        run: dotnet run --project tests/CameraFinder.Core.Tests -c Release -- --unit-only
+      - name: Live network tests (fake camera on this machine)
+        # Need raw capture and port 80, so run as root. Hosted runners may restrict multicast, so don't fail the build.
+        continue-on-error: true
+        run: sudo $(which dotnet) tests/CameraFinder.Core.Tests/bin/Release/net8.0/CameraFinder.Core.Tests.dll
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Unit tests
+        run: dotnet run --project tests/CameraFinder.Core.Tests -c Release -- --unit-only
+
+      - name: Version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = '0.1.0'
+          if ('${{ github.ref_type }}' -eq 'tag') { $v = '${{ github.ref_name }}'.TrimStart('v') }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Publish self-contained exe
+        run: >
+          dotnet publish src/CameraFinder.App -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:Version=${{ steps.ver.outputs.version }} -o publish
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+          & $iscc /DAppVersion=${{ steps.ver.outputs.version }} /DSourceDir=..\publish installer\CameraFinder.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CameraFinder-${{ steps.ver.outputs.version }}
+          path: |
+            dist/*.exe
+            publish/CameraFinder.exe
+
+      - name: Attach to release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
