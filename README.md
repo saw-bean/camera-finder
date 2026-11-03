@@ -29,6 +29,12 @@ The temporary IPs are added with `skipassource`, so the laptop's normal traffic 
 
 Requirements: Windows 10 version 2004 or later / Windows 11, administrator rights (to add temporary IPs).
 
+### Updates
+
+On start, the app asks GitHub (`api.github.com`) whether a newer release exists. If one does, the status bar shows **Update available – click to install**: the app downloads the new installer, closes (removing temporary IPs) and starts setup, which upgrades in place. With no internet (common on site networks) the check is silently skipped.
+
+To publish an update (maintainers): push a version tag, e.g. `git tag v0.2.0 && git push origin v0.2.0`. CI builds the installer and attaches it to a new release.
+
 ## Use
 
 1. Plug the laptop into the camera/door network (the NVR's switch is a good spot).

@@ -33,6 +33,8 @@ public sealed class MainForm : Form
 
     private readonly ToolStripStatusLabel _status = new() { Text = "Ready", Spring = true, TextAlign = ContentAlignment.MiddleLeft };
     private readonly ToolStripProgressBar _progress = new() { Width = 220 };
+    private readonly ToolStripStatusLabel _update = new() { IsLink = true, Visible = false };
+    private UpdateChecker.Update? _available;
 
     private readonly Dictionary<string, ListViewItem> _rows = new();
     private readonly TempAddressManager _temp;
@@ -42,7 +44,7 @@ public sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "Camera Finder";
+        Text = $"Camera Finder {UpdateChecker.CurrentVersion.ToString(3)}";
         Width = 1100;
         Height = 720;
         StartPosition = FormStartPosition.CenterScreen;
@@ -58,6 +60,7 @@ public sealed class MainForm : Form
             LoadAdapters();
             ShowNpcapStatus();
             AppendLog("Plug into the camera / door network, pick the adapter and press Scan.");
+            _ = CheckForUpdateAsync();
         };
     }
 
@@ -90,6 +93,7 @@ public sealed class MainForm : Form
 
         var statusStrip = new StatusStrip();
         statusStrip.Items.Add(_status);
+        statusStrip.Items.Add(_update);
         statusStrip.Items.Add(_progress);
 
         Controls.Add(split);
@@ -113,7 +117,55 @@ public sealed class MainForm : Form
         _export.Click += (_, _) => Export();
         _removeIps.Click += (_, _) => RemoveTemporaryAddresses();
         _npcap.LinkClicked += (_, _) => OpenUrl(PassiveListener.NpcapDownloadUrl);
+        _update.Click += async (_, _) => await InstallUpdateAsync();
         FormClosing += OnClosing;
+    }
+
+    // ------------------------------------------------------------------ updates
+
+    private async Task CheckForUpdateAsync()
+    {
+        _available = await UpdateChecker.CheckAsync(CancellationToken.None);
+        if (_available is null || IsDisposed) return;
+        _update.Text = $"Update available: {_available.Version.ToString(3)} - click to install";
+        _update.Visible = true;
+        AppendLog($"A newer version ({_available.Version.ToString(3)}) is available. Click the link in the status bar to install it.");
+    }
+
+    private async Task InstallUpdateAsync()
+    {
+        if (_available is not { } update) return;
+        if (_stop.Enabled)
+        {
+            MessageBox.Show(this, "Stop the scan first, then install the update.", "Camera Finder", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (MessageBox.Show(this,
+                $"Download and install Camera Finder {update.Version.ToString(3)}?\n\n" +
+                "Camera Finder will close (temporary IPs are removed) and the installer will start.",
+                "Update", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            return;
+
+        _update.Enabled = false;
+        _scan.Enabled = false;
+        _status.Text = "Downloading update…";
+        try
+        {
+            var path = await UpdateChecker.DownloadAsync(update, new Progress<int>(p => _progress.Value = Math.Clamp(p, 0, 100)), CancellationToken.None);
+            UpdateChecker.StartInstaller(path);
+            Close();
+        }
+        catch (Exception ex)
+        {
+            AppendLog("Update download failed: " + ex.Message);
+            _status.Text = "Update failed";
+            _progress.Value = 0;
+            _update.Enabled = true;
+            _scan.Enabled = true;
+            if (MessageBox.Show(this, "The update could not be downloaded. Open the download page instead?", "Update",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+                OpenUrl(UpdateChecker.ReleasesPage);
+        }
     }
 
     // ------------------------------------------------------------------ actions
