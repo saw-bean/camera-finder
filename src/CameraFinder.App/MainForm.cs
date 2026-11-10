@@ -11,9 +11,10 @@ namespace CameraFinder.App;
 /// <summary>Main window: pick adapter, Scan, see the device list, open a device's web page.</summary>
 public sealed class MainForm : Form
 {
-    private readonly ComboBox _adapters = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 340 };
+    private readonly ComboBox _adapters = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 260 };
     private readonly Button _refresh = new() { Text = "↻", Width = 32 };
     private readonly CheckBox _safeMode = new() { Text = "Safe mode (listen only, no network changes)", AutoSize = true };
+    private readonly TextBox _find = new() { Width = 170, PlaceholderText = "Stop when found: IP or MAC" };
     private readonly CheckBox _demo = new() { Text = "Demo (test site)", AutoSize = true };
     private readonly NumericUpDown _listen = new() { Minimum = 5, Maximum = 300, Value = 30, Width = 55 };
     private readonly Button _scan = new() { Text = "Scan", Width = 90, Height = 30, Font = new Font(SystemFonts.DefaultFont, FontStyle.Bold) };
@@ -48,6 +49,9 @@ public sealed class MainForm : Form
     private WebPageAccess? _web;
     private DemoSite? _demoSite;
     private bool _opening;
+    private Task? _scanUi;        // the whole ScanAsync, including its clean-up
+    private Task? _scanEngineTask; // the engine itself (runs off the UI thread)
+    private Device? _foundTarget;
 
     public MainForm()
     {
@@ -83,6 +87,10 @@ public sealed class MainForm : Form
         top.Controls.Add(_refresh);
         top.Controls.Add(new Label { Text = "Listen (s):", AutoSize = true, Margin = new Padding(12, 6, 3, 0) });
         top.Controls.Add(_listen);
+        _find.Margin = new Padding(12, 4, 3, 0);
+        top.Controls.Add(_find);
+        new ToolTip().SetToolTip(_find, "Type the IP or MAC you are looking for (or the last digits of the MAC on the camera's label). " +
+            "The scan stops as soon as that device is found. Leave empty to scan everything.");
         _safeMode.Margin = new Padding(12, 5, 6, 0);
         top.Controls.Add(_safeMode);
         _demo.Margin = new Padding(6, 5, 6, 0);
@@ -120,8 +128,9 @@ public sealed class MainForm : Form
     private void Wire()
     {
         _refresh.Click += (_, _) => LoadAdapters();
-        _scan.Click += async (_, _) => await ScanAsync();
+        _scan.Click += async (_, _) => { _scanUi = ScanAsync(); await _scanUi; };
         _stop.Click += (_, _) => _cts?.Cancel();
+        _find.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter && _scan.Enabled) { e.SuppressKeyPress = true; _scan.PerformClick(); } };
         _list.SelectedIndexChanged += (_, _) => UpdateButtons();
         _list.DoubleClick += async (_, _) => await OpenSelectedAsync();
         _list.ColumnClick += (_, e) => Sort(e.Column);
@@ -247,18 +256,42 @@ public sealed class MainForm : Form
 
         _engine.Log += AppendLog;
         var engine = _engine;
-        _engine.DeviceChanged += d => Post(() => { if (_engine == engine) UpsertRow(d); });
+        string? wanted = string.IsNullOrWhiteSpace(_find.Text) ? null : _find.Text.Trim();
+        _foundTarget = null;
+        if (wanted != null) AppendLog($"The scan will stop as soon as {wanted} is found.");
+        _engine.DeviceChanged += d => Post(() =>
+        {
+            if (_engine != engine) return;
+            UpsertRow(d);
+            if (wanted != null && _foundTarget == null && _cts is { IsCancellationRequested: false } && d.Matches(wanted)) StopAtFound(d);
+        });
         _engine.Progress += (phase, pct) => Post(() => { if (_engine == engine) { _status.Text = phase; _progress.Value = pct; } });
 
         try
         {
-            await _engine.RunAsync(adapter, options, _cts.Token);
+            // Run the engine off the UI thread: adding temporary IPs (netsh) blocks, and the window must stay responsive.
+            var token = _cts.Token;
+            _scanEngineTask = Task.Run(() => engine.RunAsync(adapter, options, token));
+            await _scanEngineTask;
             foreach (var d in _engine.Devices) UpsertRow(d);
             _status.Text = $"Done - {_engine.Devices.Count} device(s)";
+            if (wanted != null)
+            {
+                var hit = _foundTarget ?? _engine.Devices.FirstOrDefault(x => x.Matches(wanted));
+                if (hit != null) { AppendLog($"Found {hit.Ip} ({hit.Description})."); SelectRow(hit); }
+                else AppendLog($"{wanted} was not found. Check the cable/VLAN, try a longer listen time, or leave the box empty to see everything.");
+            }
         }
         catch (OperationCanceledException)
         {
-            AppendLog("Scan stopped.");
+            int n = _engine.Devices.Count;
+            foreach (var d in _engine.Devices) UpsertRow(d);
+            if (_foundTarget != null)
+            {
+                AppendLog($"Found {_foundTarget.Ip} ({_foundTarget.Description}) - scan stopped. {n} device(s) found so far are listed.");
+                SelectRow(_foundTarget);
+            }
+            else AppendLog($"Scan stopped. {n} device(s) found so far are listed.");
             _status.Text = "Stopped";
         }
         catch (Exception ex)
@@ -314,7 +347,7 @@ public sealed class MainForm : Form
         var d = Selected();
         if (d == null || _opening) return;
         if (_web == null || _engine == null) { AppendLog("Run a scan first."); return; }
-        if (_stop.Enabled) { AppendLog("Wait for the scan to finish (or press Stop), then open the web page."); return; }
+        if (_stop.Enabled) await StopScanAsync($"Stopping the scan to open {d.Ip}…");
 
         _opening = true;
         UpdateButtons();
@@ -379,14 +412,15 @@ public sealed class MainForm : Form
         var d = Selected();
         if (d == null || _opening) return;
         if (_web == null || _engine == null) { AppendLog("Run a scan first."); return; }
+        if (_stop.Enabled) await StopScanAsync($"Stopping the scan to ping {d.Ip}…");
 
         _opening = true;
         UpdateButtons();
         try
         {
             var avoid = _engine.Devices.Select(x => x.Ip).ToHashSet();
-            var reach = await _web.EnsureReachableAsync(d.Ip, mayJoin: !_safeMode.Checked && !_stop.Enabled, avoid, CancellationToken.None);
-            if (reach.Status == WebPageStatus.NeedsTemporaryAddress && !_stop.Enabled)
+            var reach = await _web.EnsureReachableAsync(d.Ip, mayJoin: !_safeMode.Checked, avoid, CancellationToken.None);
+            if (reach.Status == WebPageStatus.NeedsTemporaryAddress)
             {
                 var answer = MessageBox.Show(this,
                     $"{d.Ip} is in {reach.Range}, a range this laptop is not in, so it will not answer pings.\n\n" +
@@ -481,14 +515,45 @@ public sealed class MainForm : Form
         _refresh.Enabled = !scanning;
         _safeMode.Enabled = !scanning;
         _demo.Enabled = !scanning;
+        _find.Enabled = !scanning;
         _listen.Enabled = !scanning;
         _removeIps.Enabled = !scanning;
         if (!scanning) _progress.Value = 0;
     }
 
+    /// <summary>The device the user is looking for has appeared: stop the scan, keep the list, select it.</summary>
+    private void StopAtFound(Device d)
+    {
+        _foundTarget = d;
+        _status.Text = $"Found {d.Ip} - stopping…";
+        SelectRow(d);
+        _cts?.Cancel();
+    }
+
+    private void SelectRow(Device d)
+    {
+        if (!_rows.TryGetValue(d.Ip.ToString(), out var item)) return;
+        _list.SelectedItems.Clear();
+        item.Selected = true;
+        item.Focused = true;
+        item.EnsureVisible();
+        _list.Focus();
+    }
+
+    /// <summary>Stops a running scan and waits until it has wrapped up (the list keeps what was found).</summary>
+    private async Task StopScanAsync(string message)
+    {
+        if (_scanUi == null || _scanUi.IsCompleted) return;
+        AppendLog(message);
+        _cts?.Cancel();
+        try { await _scanUi; } catch { /* ScanAsync reports its own errors */ }
+    }
+
     private void OnClosing(object? sender, FormClosingEventArgs e)
     {
         _cts?.Cancel();
+        // Let the engine wind down before undoing its network changes, so it cannot add an address afterwards.
+        try { _scanEngineTask?.Wait(TimeSpan.FromSeconds(8)); } catch { /* cancelled or failed: fine */ }
         if (_temp.Added.Count > 0)
         {
             _status.Text = "Removing temporary IPs…";

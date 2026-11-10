@@ -40,7 +40,8 @@ To publish an update (maintainers): push a version tag, e.g. `git tag v0.2.0 && 
 1. Plug the laptop into the camera/door network (the NVR's switch is a good spot).
 2. Start **Camera Finder**, pick the wired adapter, press **Scan**.
 3. Wait for the listen time (30 s default — longer finds more quiet devices).
-4. Double-click a device, or select it and press **Open web page**.
+   Looking for one device? Type its IP or MAC (or the last digits of the MAC on its label, e.g. `3456`) in **Stop when found** before pressing Scan: the scan stops as soon as it appears and selects it. **Stop** at any time also keeps everything found so far.
+4. Double-click a device, or select it and press **Open web page** (works during a scan too - the scan stops first).
 5. **Export CSV…** saves the list for the job file.
 6. Close the app (or press **Remove temporary IPs**) when you're done.
 

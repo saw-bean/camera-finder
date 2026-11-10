@@ -90,5 +90,22 @@ public sealed class Device
     private static string? FirstNonEmpty(params string?[] values) =>
         values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
 
+    /// <summary>
+    /// True when <paramref name="query"/> identifies this device: its IP ("10.0.5.21"), its full MAC in any format
+    /// ("00:40:8C:12:34:56", "00408c123456"), or the end of its MAC as printed on a camera label (at least 4 hex digits, "3456").
+    /// </summary>
+    public bool Matches(string? query)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return false;
+        string q = query.Trim();
+        if (q.Count(c => c == '.') == 3)
+            return IPAddress.TryParse(q, out var ip) && ip.Equals(Ip);
+        if (!q.All(c => Uri.IsHexDigit(c) || c is ':' or '-' or ' ')) return false;
+        string hex = new string(q.Where(Uri.IsHexDigit).ToArray());
+        string? mac = Mac == null ? null : new string(Mac.Where(Uri.IsHexDigit).ToArray());
+        if (mac == null || hex.Length < 4 || hex.Length > 12) return false;
+        return mac.EndsWith(hex, StringComparison.OrdinalIgnoreCase);
+    }
+
     public override string ToString() => $"{Ip} {Mac} {Vendor} {Description}";
 }

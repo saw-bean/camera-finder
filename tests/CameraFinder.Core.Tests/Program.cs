@@ -834,6 +834,38 @@ static class Tests
         Assert.Equal(WebPageStatus.JoinFailed, (await noJoiner.PrepareAsync(new Device(IPAddress.Parse("10.9.9.9")), true, new HashSet<IPAddress>(), CancellationToken.None)).Status);
     }
 
+    // ---------- "Stop when found" ----------
+
+    public static void TestDeviceMatchesIpOrMac()
+    {
+        var d = new Device(IPAddress.Parse("10.0.5.21")) { Mac = "00:40:8C:12:34:56" };
+        Assert.True(d.Matches("10.0.5.21") && d.Matches(" 10.0.5.21 "), "IP");
+        Assert.True(!d.Matches("10.0.5.2") && !d.Matches("10.0.5.210"), "other IPs");
+        Assert.True(d.Matches("00:40:8C:12:34:56") && d.Matches("00-40-8c-12-34-56") && d.Matches("00408C123456"), "full MAC, any format");
+        Assert.True(d.Matches("3456") && d.Matches("12:34:56") && d.Matches("8c123456"), "end of MAC from the label");
+        Assert.True(!d.Matches("34") && !d.Matches("1234") && !d.Matches("hello") && !d.Matches("") && !d.Matches(null), "too short / not hex / wrong");
+        Assert.True(!new Device(IPAddress.Parse("10.0.5.22")).Matches("3456"), "no MAC yet");
+    }
+
+    public static async Task TestDemoScanCanStopAtTheWantedDevice()
+    {
+        // The app cancels the scan from DeviceChanged when the device matches; the devices found so far stay listed.
+        var site = new DemoSite { ArpDelay = TimeSpan.FromMilliseconds(2), JoinDelay = TimeSpan.Zero };
+        var engine = new ScanEngine(site, site, capture: site, readDetails: site.ReadDetailsAsync);
+        using var cts = new CancellationTokenSource();
+        Device? found = null;
+        engine.DeviceChanged += d => { if (d.Matches("50:05:40") && found == null) { found = d; cts.Cancel(); } }; // the quiet i-PRO in 10.0.5.x
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        bool stopped = false;
+        try { await engine.RunAsync(site.Laptop, DemoSite.Options(TimeSpan.FromMilliseconds(100), false), cts.Token); }
+        catch (OperationCanceledException) { stopped = true; }
+        Assert.True(stopped, "scan stopped early");
+        Assert.Equal("10.0.5.40", found?.Ip.ToString(), "wanted device found");
+        Assert.True(engine.Devices.Any(d => d.Ip.ToString() == "10.0.5.40"), "still listed after stopping");
+        Assert.True(engine.Devices.Count < DemoSite.Devices.Count, $"stopped before the end ({engine.Devices.Count} of {DemoSite.Devices.Count})");
+        Assert.True(sw.ElapsedMilliseconds < 3000, "stops promptly");
+    }
+
     // ---------- Continuous ping ----------
 
     public static void TestPingStatsAndDownUpAlerts()
