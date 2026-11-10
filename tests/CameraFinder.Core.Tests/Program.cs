@@ -834,6 +834,92 @@ static class Tests
         Assert.Equal(WebPageStatus.JoinFailed, (await noJoiner.PrepareAsync(new Device(IPAddress.Parse("10.9.9.9")), true, new HashSet<IPAddress>(), CancellationToken.None)).Status);
     }
 
+    // ---------- Continuous ping ----------
+
+    public static void TestPingStatsAndDownUpAlerts()
+    {
+        var s = new PingStats();
+        var t = new DateTime(2026, 1, 1, 12, 0, 0);
+        Assert.Equal(null, s.Add(new PingResult(true, 2), t));
+        Assert.Equal(null, s.Add(new PingResult(true, 6), t));
+        Assert.Equal(null, s.Add(new PingResult(false, 0, "Request timed out"), t.AddSeconds(2)));
+        Assert.Equal(null, s.Add(new PingResult(false, 0, "Request timed out"), t.AddSeconds(3)));
+        Assert.Equal("DOWN", s.Add(new PingResult(false, 0, "Request timed out"), t.AddSeconds(4)), "down after 3 lost in a row");
+        Assert.Equal(null, s.Add(new PingResult(false, 0, "Request timed out"), t.AddSeconds(5)), "only announced once");
+        Assert.Equal(t.AddSeconds(2), s.DownSince, "down since first lost");
+        Assert.Equal("UP", s.Add(new PingResult(true, 1), t.AddSeconds(6)));
+        Assert.Equal(7, s.Sent);
+        Assert.Equal(3, s.Received);
+        Assert.Equal(1L, s.MinMs);
+        Assert.Equal(6L, s.MaxMs);
+        Assert.Equal(3.0, s.AvgMs);
+        Assert.True(s.ToString().Contains("Lost 4 (57.1%)"), s.ToString());
+
+        var never = new PingStats();
+        for (int i = 0; i < 5; i++) Assert.Equal(null, never.Add(new PingResult(false, 0, "x"), t), "no DOWN for a device that never answered");
+        Assert.True(!never.ToString().Contains("Min"), "no times without replies");
+    }
+
+    sealed class FakePinger(Func<int, PingResult> answer) : IPinger
+    {
+        public int Calls;
+        public IPAddress? LastSource;
+        public Task<PingResult> PingAsync(IPAddress target, IPAddress? source, TimeSpan timeout, CancellationToken ct)
+        {
+            LastSource = source;
+            return Task.FromResult(answer(Interlocked.Increment(ref Calls)));
+        }
+    }
+
+    public static async Task TestContinuousPingRunsUntilStopped()
+    {
+        var pinger = new FakePinger(n => n % 4 == 0 ? new PingResult(false, 0, "Request timed out") : new PingResult(true, 3));
+        var results = new List<PingResult>();
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(550));
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await ContinuousPing.RunAsync(pinger, IPAddress.Parse("10.0.5.21"), IPAddress.Parse("10.0.5.251"), TimeSpan.FromMilliseconds(50),
+            TimeSpan.FromMilliseconds(50), (r, _, _) => results.Add(r), cts.Token);
+        Assert.True(sw.ElapsedMilliseconds < 1500, "stops promptly when cancelled");
+        Assert.True(results.Count is >= 6 and <= 14, $"one request per interval ({results.Count} in 550 ms at 50 ms)");
+        Assert.Equal("10.0.5.251", pinger.LastSource?.ToString(), "sent from the address in the device's range");
+
+        var throwing = new FakePinger(_ => throw new InvalidOperationException("adapter gone"));
+        var seen = new List<PingResult>();
+        using var cts2 = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        await ContinuousPing.RunAsync(throwing, IPAddress.Loopback, null, TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(50), (r, _, _) => seen.Add(r), cts2.Token);
+        Assert.True(seen.Count > 1 && seen.All(r => !r.Success && r.Status == "adapter gone"), "errors are reported, ping keeps going");
+    }
+
+    public static async Task TestIcmpPingLoopback()
+    {
+        // Real ICMP. With a source address this uses IcmpSendEcho2Ex on Windows (checked by the Windows CI job).
+        var pinger = new IcmpPinger();
+        var r = await pinger.PingAsync(IPAddress.Loopback, null, TimeSpan.FromSeconds(2), CancellationToken.None);
+        if (!r.Success && r.Status != null && r.Status.Contains("permi", StringComparison.OrdinalIgnoreCase)) throw new SkipException("ICMP not permitted: " + r.Status);
+        Assert.True(r.Success, "loopback answers: " + r.Status);
+        var withSource = await pinger.PingAsync(IPAddress.Loopback, IPAddress.Loopback, TimeSpan.FromSeconds(2), CancellationToken.None);
+        Assert.True(withSource.Success, "loopback answers with explicit source: " + withSource.Status);
+    }
+
+    public static async Task TestDemoPingNeedsTheDevicesRange()
+    {
+        var site = FastDemo();
+        var web = new WebPageAccess(site, () => site.Laptop, site.ReadDetailsAsync);
+        var axis = IPAddress.Parse("10.0.5.21");
+        var before = await site.PingAsync(axis, null, TimeSpan.FromMilliseconds(20), CancellationToken.None);
+        Assert.True(!before.Success, "no reply from another range");
+
+        var reach = await web.EnsureReachableAsync(axis, mayJoin: true, new HashSet<IPAddress>(), CancellationToken.None);
+        Assert.Equal(WebPageStatus.Ready, reach.Status);
+        Assert.Equal("10.0.5.251", reach.Source?.ToString(), "ping source is the temporary IP");
+        var after = await site.PingAsync(axis, reach.Source, TimeSpan.FromMilliseconds(20), CancellationToken.None);
+        Assert.True(after.Success && after.RoundTripMs is >= 1 and <= 4, "reply after joining");
+
+        var own = await web.EnsureReachableAsync(IPAddress.Parse("192.168.1.64"), mayJoin: false, new HashSet<IPAddress>(), CancellationToken.None);
+        Assert.Equal("192.168.1.50", own.Source?.ToString(), "own range: laptop's normal address, nothing added");
+        Assert.Equal(null, own.TemporaryAddress);
+    }
+
     sealed class NoJoin : IAddressJoiner
     {
         public Task<IPAddress?> AddFreeAddressAsync(Adapter adapter, Subnet subnet, ISet<IPAddress> avoid, CancellationToken ct) => Task.FromResult<IPAddress?>(null);

@@ -13,6 +13,10 @@ public static class Reach
     public static bool CanReach(IEnumerable<(IPAddress Address, int Prefix)> addresses, IPAddress ip) =>
         addresses.Any(a => a.Address.AddressFamily == AddressFamily.InterNetwork && Subnet.Of(a.Address, a.Prefix).Contains(ip));
 
+    /// <summary>The laptop's address in the same subnet as <paramref name="ip"/> (the one to send from), or null.</summary>
+    public static IPAddress? SourceFor(IEnumerable<(IPAddress Address, int Prefix)> addresses, IPAddress ip) =>
+        addresses.FirstOrDefault(a => a.Address.AddressFamily == AddressFamily.InterNetwork && Subnet.Of(a.Address, a.Prefix).Contains(ip)).Address;
+
     /// <summary>Ranges the app may add a temporary address in: private ranges, 192.0.0.0/24 and link-local.</summary>
     public static bool MayJoin(IPAddress ip) => Ipv4.IsUsableHost(ip) && (Ipv4.IsJoinable(ip) || Ipv4.IsLinkLocal(ip));
 }

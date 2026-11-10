@@ -18,7 +18,9 @@ public enum WebPageStatus
     NoWebPage,
 }
 
-public sealed record WebPageResult(WebPageStatus Status, string? Url = null, Subnet? Range = null, IPAddress? TemporaryAddress = null);
+/// <param name="Source">The laptop's address in the device's range (to send from).</param>
+public sealed record WebPageResult(WebPageStatus Status, string? Url = null, Subnet? Range = null, IPAddress? TemporaryAddress = null,
+    IPAddress? Source = null);
 
 /// <summary>
 /// "Open web page" for any device in the list, even one in a range the laptop is not in: if needed, adds a temporary
@@ -40,22 +42,34 @@ public sealed class WebPageAccess
         _readDetails = readDetails;
     }
 
+    /// <summary>
+    /// Makes sure the laptop has an address in the device's range, adding a temporary one if needed and allowed.
+    /// Returns <see cref="WebPageStatus.Ready"/> with <see cref="WebPageResult.Source"/> = the laptop's address in that range.
+    /// </summary>
+    public async Task<WebPageResult> EnsureReachableAsync(IPAddress ip, bool mayJoin, ISet<IPAddress> avoid, CancellationToken ct)
+    {
+        var adapter = _adapter();
+        var range = Reach.RangeFor(ip);
+        var source = adapter == null ? null : Reach.SourceFor(adapter.Addresses, ip);
+        if (source != null) return new WebPageResult(WebPageStatus.Ready, Range: range, Source: source);
+
+        if (!Reach.MayJoin(ip)) return new WebPageResult(WebPageStatus.NotJoinable, Range: range);
+        if (!mayJoin) return new WebPageResult(WebPageStatus.NeedsTemporaryAddress, Range: range);
+        if (_joiner == null || adapter == null) return new WebPageResult(WebPageStatus.JoinFailed, Range: range);
+        var added = await _joiner.AddFreeAddressAsync(adapter, range, avoid, ct);
+        return added == null
+            ? new WebPageResult(WebPageStatus.JoinFailed, Range: range)
+            : new WebPageResult(WebPageStatus.Ready, Range: range, TemporaryAddress: added, Source: added);
+    }
+
     /// <param name="mayJoin">False in safe mode: report <see cref="WebPageStatus.NeedsTemporaryAddress"/> instead of adding one.</param>
     /// <param name="avoid">Addresses known to be in use (other devices), never picked as the temporary address.</param>
     public async Task<WebPageResult> PrepareAsync(Device device, bool mayJoin, ISet<IPAddress> avoid, CancellationToken ct)
     {
-        var adapter = _adapter();
-        var range = Reach.RangeFor(device.Ip);
-        IPAddress? added = null;
-
-        if (adapter == null || !Reach.CanReach(adapter.Addresses, device.Ip))
-        {
-            if (!Reach.MayJoin(device.Ip)) return new WebPageResult(WebPageStatus.NotJoinable, Range: range);
-            if (!mayJoin) return new WebPageResult(WebPageStatus.NeedsTemporaryAddress, Range: range);
-            if (_joiner == null || adapter == null) return new WebPageResult(WebPageStatus.JoinFailed, Range: range);
-            added = await _joiner.AddFreeAddressAsync(adapter, range, avoid, ct);
-            if (added == null) return new WebPageResult(WebPageStatus.JoinFailed, Range: range);
-        }
+        var reach = await EnsureReachableAsync(device.Ip, mayJoin, avoid, ct);
+        if (reach.Status != WebPageStatus.Ready) return reach;
+        var range = reach.Range;
+        var added = reach.TemporaryAddress;
 
         // Check again even when a URL is known: the page may only now be reachable, or may have moved port.
         if (added != null || device.WebUrl == null) await _readDetails(device, ct);

@@ -11,7 +11,7 @@ namespace CameraFinder.Core.Discovery;
 /// network card, Npcap, ARP and netsh, so a demo scan sends nothing and never changes the laptop's settings.
 /// The laptop is 192.168.1.50/24.
 /// </summary>
-public sealed class DemoSite : IPassiveCapture, IArpResolver, IAddressJoiner
+public sealed class DemoSite : IPassiveCapture, IArpResolver, IAddressJoiner, IPinger
 {
     /// <param name="Heard">Transmits on its own (ARP, DHCP, broadcast), so passive listening hears it.</param>
     /// <param name="MentionedOnly">Never transmits, but other traffic asks for its address (an ARP request target).</param>
@@ -114,6 +114,25 @@ public sealed class DemoSite : IPassiveCapture, IArpResolver, IAddressJoiner
             if (ip != null) _joined.Add((ip, subnet.Prefix));
             return ip;
         }
+    }
+
+    // ---- IPinger: devices answer when the laptop is in their range. The Dahua camera "reboots" for 10 s of every
+    // 60 s, so the ping window's DOWN / UP alerts can be tried out.
+
+    public const string RebootingDevice = "192.168.1.108";
+    private readonly Random _rnd = new();
+
+    public async Task<PingResult> PingAsync(IPAddress target, IPAddress? source, TimeSpan timeout, CancellationToken ct)
+    {
+        await Task.Delay(TimeSpan.FromMilliseconds(5), ct);
+        bool rebooting = target.ToString() == RebootingDevice && DateTime.UtcNow.Second is >= 30 and < 40;
+        if (!_byIp.ContainsKey(target.ToString()) || !Reach.CanReach(Laptop.Addresses, target) || rebooting)
+        {
+            await Task.Delay(timeout, ct);
+            return new PingResult(false, 0, "Request timed out");
+        }
+        int ms; lock (_rnd) ms = _rnd.Next(1, 5);
+        return new PingResult(true, ms);
     }
 
     public void ForgetJoined() { lock (_lock) _joined.Clear(); }

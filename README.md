@@ -46,6 +46,8 @@ To publish an update (maintainers): push a version tag, e.g. `git tag v0.2.0 && 
 
 **Open web page for any device.** If a device is in a range the laptop isn't in (e.g. a new Hikvision on `192.0.0.64`, or a range beyond the 6 joined automatically), *Open web page* first adds a temporary IP in that range (e.g. `192.0.0.251`), checks the device's ports, then opens its page. In safe mode it asks before adding the IP. Like all temporary IPs, it is removed when you close the app or press *Remove temporary IPs*.
 
+**Ping** (continuous, like `ping -t`) opens a window for the selected device: one line per second, running totals (sent, lost %, min/avg/max) and a clear **DOWN** / **UP** line when it stops or starts answering - handy while a camera reboots or a cable is moved. Open several at once. For a device in another range it adds a temporary IP first (asks in safe mode) and pings from it.
+
 **Demo (test site)** scans a simulated site instead of the real network: 12 devices of different brands spread over five IP ranges, including quiet cameras, a door controller, a camera on its factory-default IP and one with a self-assigned IP. Nothing is sent and the laptop's settings are not changed, so it is safe for testing and training anywhere. *Open web page* in demo shows the temporary-IP step without opening a browser.
 
 **Safe mode** only listens and sends discovery probes. It never changes the laptop's network settings and never sweeps. Use it on sensitive client networks.

@@ -28,6 +28,7 @@ public sealed class MainForm : Form
     private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, BackColor = SystemColors.Window };
     private readonly Button _open = new() { Text = "Open web page", Width = 120, Enabled = false };
     private readonly Button _copy = new() { Text = "Copy IP", Width = 80, Enabled = false };
+    private readonly Button _ping = new() { Text = "Ping", Width = 70, Enabled = false };
     private readonly Button _export = new() { Text = "Export CSV…", Width = 100 };
     private readonly Button _removeIps = new() { Text = "Remove temporary IPs", Width = 160 };
     private readonly LinkLabel _npcap = new() { AutoSize = true };
@@ -94,7 +95,8 @@ public sealed class MainForm : Form
             _list.Columns.Add(name, width);
 
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 38, Padding = new Padding(6, 4, 6, 0) };
-        buttons.Controls.AddRange(new Control[] { _open, _copy, _export, _removeIps });
+        buttons.Controls.AddRange(new Control[] { _open, _ping, _copy, _export, _removeIps });
+        new ToolTip().SetToolTip(_ping, "Ping the selected device continuously (like ping -t). Shows when it goes down and comes back.");
         _npcap.Margin = new Padding(16, 7, 0, 0);
         buttons.Controls.Add(_npcap);
 
@@ -130,6 +132,7 @@ public sealed class MainForm : Form
             try { Clipboard.SetText(d.Ip.ToString()); }
             catch (Exception ex) { AppendLog("Could not copy to the clipboard: " + ex.Message); } // clipboard held by another app
         };
+        _ping.Click += async (_, _) => await PingSelectedAsync();
         _export.Click += (_, _) => Export();
         _removeIps.Click += (_, _) => RemoveTemporaryAddresses();
         _npcap.LinkClicked += (_, _) => OpenUrl(PassiveListener.NpcapDownloadUrl);
@@ -299,6 +302,7 @@ public sealed class MainForm : Form
         var d = Selected();
         _open.Enabled = d != null && !_opening;
         _copy.Enabled = d != null;
+        _ping.Enabled = d != null && !_opening;
     }
 
     /// <summary>
@@ -362,6 +366,51 @@ public sealed class MainForm : Form
         {
             _opening = false;
             _status.Text = "Ready";
+            UpdateButtons();
+        }
+    }
+
+    /// <summary>
+    /// Opens a continuous-ping window for the selected device. If the laptop is not in the device's range, a temporary
+    /// IP is added first (asking in safe mode), and pings are sent from it.
+    /// </summary>
+    private async Task PingSelectedAsync()
+    {
+        var d = Selected();
+        if (d == null || _opening) return;
+        if (_web == null || _engine == null) { AppendLog("Run a scan first."); return; }
+
+        _opening = true;
+        UpdateButtons();
+        try
+        {
+            var avoid = _engine.Devices.Select(x => x.Ip).ToHashSet();
+            var reach = await _web.EnsureReachableAsync(d.Ip, mayJoin: !_safeMode.Checked && !_stop.Enabled, avoid, CancellationToken.None);
+            if (reach.Status == WebPageStatus.NeedsTemporaryAddress && !_stop.Enabled)
+            {
+                var answer = MessageBox.Show(this,
+                    $"{d.Ip} is in {reach.Range}, a range this laptop is not in, so it will not answer pings.\n\n" +
+                    "Add a temporary IP address in that range first?\n\n" +
+                    "Safe mode is on: this changes the laptop's network settings until you press \"Remove temporary IPs\" or close the app.",
+                    "Ping", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+                if (answer == DialogResult.Cancel) return;
+                if (answer == DialogResult.Yes) reach = await _web.EnsureReachableAsync(d.Ip, mayJoin: true, avoid, CancellationToken.None);
+            }
+            if (reach.TemporaryAddress != null)
+                AppendLog($"Added temporary IP {reach.TemporaryAddress} in {reach.Range} to reach {d.Ip}{(_demoSite != null ? " (demo)" : "")}.");
+            if (reach.Status == WebPageStatus.JoinFailed)
+                AppendLog($"Could not add a temporary IP in {reach.Range}; pinging anyway (replies are unlikely).");
+
+            IPinger pinger = _demoSite != null ? _demoSite : new IcmpPinger();
+            new PingWindow(pinger, d.Ip, reach.Source, d.Description).Show(this);
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Could not ping {d.Ip}: {ex.Message}");
+        }
+        finally
+        {
+            _opening = false;
             UpdateButtons();
         }
     }
