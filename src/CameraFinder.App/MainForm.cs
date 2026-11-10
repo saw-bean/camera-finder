@@ -13,27 +13,29 @@ public sealed class MainForm : Form
 {
     // Buttons size themselves to their text (AutoSize) so nothing is cut off at 125% / 150% Windows scaling.
     private readonly ComboBox _adapters = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill, Margin = new Padding(3, 4, 3, 3) };
-    private readonly Button _refresh = Btn("↻", minWidth: 32);
+    private readonly FluentButton _refresh = Btn("↻", minWidth: 32);
     private readonly CheckBox _safeMode = new() { Text = "Safe mode", AutoSize = true, Margin = new Padding(14, 6, 3, 0) };
     private readonly TextBox _find = new() { Width = 190, PlaceholderText = "IP or MAC", Margin = new Padding(3, 4, 3, 3) };
     private readonly CheckBox _demo = new() { Text = "Demo (test site)", AutoSize = true, Margin = new Padding(10, 6, 3, 0) };
     private readonly NumericUpDown _listen = new() { Minimum = 5, Maximum = 300, Value = 30, Width = 55, Margin = new Padding(3, 4, 3, 3) };
-    private readonly Button _scan = Btn("Scan", minWidth: 90, bold: true);
-    private readonly Button _stop = Btn("Stop", minWidth: 70, enabled: false);
+    private readonly FluentButton _scan = Btn("Scan", minWidth: 90, bold: true);
+    private readonly FluentButton _stop = Btn("Stop", minWidth: 70, enabled: false);
 
     private readonly ListView _list = new()
     {
-        View = View.Details, FullRowSelect = true, GridLines = true, MultiSelect = false,
+        View = View.Details, FullRowSelect = true, GridLines = false, MultiSelect = false, OwnerDraw = true,
         Dock = DockStyle.Fill, HideSelection = false,
     };
 
     private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, BackColor = SystemColors.Window };
-    private readonly Button _open = Btn("Open web page", enabled: false);
-    private readonly Button _ping = Btn("Ping", enabled: false);
-    private readonly Button _copy = Btn("Copy IP", enabled: false);
-    private readonly Button _export = Btn("Export CSV…");
-    private readonly Button _removeIps = Btn("Remove temporary IPs");
+    private readonly FluentButton _open = Btn("Open web page", enabled: false);
+    private readonly FluentButton _ping = Btn("Ping", enabled: false);
+    private readonly FluentButton _copy = Btn("Copy IP", enabled: false);
+    private readonly FluentButton _export = Btn("Export CSV…");
+    private readonly FluentButton _removeIps = Btn("Remove temporary IPs");
     private readonly ToolStripStatusLabel _npcap = new() { Margin = new Padding(12, 3, 0, 2) };
+    private readonly Label _devicesTitle = new() { Text = "Devices", AutoSize = true, Margin = new Padding(0, 0, 0, 6) };
+    private readonly Label _devicesCount = new() { Text = "", AutoSize = true, Tag = "secondary", Margin = new Padding(8, 2, 0, 6) };
 
     private readonly ToolStripStatusLabel _status = new() { Text = "Ready", Spring = true, TextAlign = ContentAlignment.MiddleLeft };
     private readonly ToolStripProgressBar _progress = new() { Width = 160 };
@@ -54,6 +56,9 @@ public sealed class MainForm : Form
     private Task? _scanEngineTask; // the engine itself (runs off the UI thread)
     private Device? _foundTarget;
 
+    /// <summary>Set by --screenshot: run the demo and save screenshots there, then exit.</summary>
+    public string? ScreenshotFolder { get; init; }
+
     public MainForm()
     {
         Text = $"Camera Finder {UpdateChecker.CurrentVersion.ToString(3)}";
@@ -61,7 +66,7 @@ public sealed class MainForm : Form
         Height = 680;
         MinimumSize = new Size(760, 480);
         StartPosition = FormStartPosition.CenterScreen;
-        Font = new Font("Segoe UI", 9F);
+        Font = Theme.Body;
         using (var ico = typeof(MainForm).Assembly.GetManifestResourceStream("CameraFinder.App.app.ico"))
             if (ico != null) Icon = new Icon(ico);
 
@@ -76,20 +81,19 @@ public sealed class MainForm : Form
             ShowNpcapStatus();
             AppendLog("Plug into the camera / door network, pick the adapter and press Scan.");
             _ = CheckForUpdateAsync();
+            if (ScreenshotFolder != null) _ = TakeScreenshotsAsync(ScreenshotFolder);
         };
     }
 
     // ------------------------------------------------------------------ layout
 
-    private static Button Btn(string text, int minWidth = 75, bool bold = false, bool enabled = true) => new()
+    private static FluentButton Btn(string text, int minWidth = 80, bool bold = false, bool enabled = true) => new()
     {
-        Text = text, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowOnly, MinimumSize = new Size(minWidth, 28),
-        Padding = new Padding(6, 0, 6, 0), Enabled = enabled, Margin = new Padding(3, 2, 3, 2),
-        Font = bold ? new Font("Segoe UI", 9F, FontStyle.Bold) : null,
+        Text = text, MinimumSize = new Size(minWidth, 32), Enabled = enabled, Primary = bold,
     };
 
     private static Label Caption(string text, int left = 0) =>
-        new() { Text = text, AutoSize = true, Margin = new Padding(left, 7, 2, 0) };
+        new() { Text = text, AutoSize = true, Margin = new Padding(left, 9, 4, 0) };
 
     // Column share of the list width (percent). Columns are re-fitted whenever the list is resized,
     // so the whole table is visible without a horizontal scroll bar.
@@ -100,30 +104,28 @@ public sealed class MainForm : Form
 
     private void BuildLayout()
     {
-        // Row 1: adapter (stretches), refresh, Scan, Stop.
+        Padding = new Padding(12, 10, 12, 0);
+
+        // Card 1 - scan controls. Row 1: adapter (stretches), refresh, Scan, Stop.
         var row1 = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 5, RowCount = 1, Margin = Padding.Empty };
         row1.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         row1.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         row1.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         row1.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         row1.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        row1.Controls.Add(Caption("Adapter:"), 0, 0);
+        row1.Controls.Add(Caption("Adapter"), 0, 0);
         row1.Controls.Add(_adapters, 1, 0);
+        _refresh.MinimumSize = new Size(36, 32);
         row1.Controls.Add(_refresh, 2, 0);
-        _scan.Margin = new Padding(12, 2, 3, 2);
+        _scan.Margin = new Padding(14, 3, 3, 3);
         row1.Controls.Add(_scan, 3, 0);
         row1.Controls.Add(_stop, 4, 0);
 
         // Row 2: options. Wraps onto another line rather than hiding anything if the window is narrow.
-        var row2 = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true, Margin = Padding.Empty };
-        row2.Controls.AddRange(new Control[] { Caption("Listen (s):"), _listen, Caption("Stop when found:", 14), _find, _safeMode, _demo });
+        var row2 = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true, Margin = new Padding(0, 4, 0, 0) };
+        row2.Controls.AddRange(new Control[] { Caption("Listen (s)"), _listen, Caption("Stop when found", 16), _find, _safeMode, _demo });
 
-        var header = new TableLayoutPanel
-        {
-            Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 1, RowCount = 2, Padding = new Padding(6, 6, 6, 2),
-        };
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        var header = new FluentCard { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, RowCount = 2 };
         header.Controls.Add(row1, 0, 0);
         header.Controls.Add(row2, 0, 1);
 
@@ -136,38 +138,127 @@ public sealed class MainForm : Form
         tips.SetToolTip(_ping, "Ping the selected device continuously (like ping -t). Shows when it goes down and comes back.");
         tips.SetToolTip(_open, "Open the selected device's web page. If it is in another IP range, a temporary IP is added first.");
         tips.SetToolTip(_removeIps, "Remove the temporary IP addresses this app added to the laptop.");
+        tips.SetToolTip(_refresh, "Reload the list of network adapters.");
 
+        // Card 2 - device list, with a title and live count.
         foreach (var (name, _) in ColumnShares) _list.Columns.Add(name, 100);
         _list.ClientSizeChanged += (_, _) => FitColumns();
+        _list.SmallImageList = new ImageList { ImageSize = new Size(1, 30) }; // taller, Windows 11-like rows
+        _list.DrawColumnHeader += DrawHeader;
+        _list.DrawItem += (_, e) => e.DrawDefault = true;
+        _list.DrawSubItem += (_, e) => e.DrawDefault = true;
+        _devicesTitle.Font = Theme.Subtitle;
+        var titleRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty, Dock = DockStyle.Fill };
+        titleRow.Controls.AddRange(new Control[] { _devicesTitle, _devicesCount });
+        var devicesCard = new FluentCard { Dock = DockStyle.Fill, RowCount = 2 };
+        devicesCard.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        devicesCard.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        devicesCard.Controls.Add(titleRow, 0, 0);
+        devicesCard.Controls.Add(_list, 0, 1);
 
-        // Bottom buttons: device actions on the left, list/laptop actions on the right.
-        var bottom = new TableLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, ColumnCount = 2, RowCount = 1, Padding = new Padding(6, 4, 6, 2) };
+        // Card 3 - activity log.
+        var logTitle = new Label { Text = "Activity", AutoSize = true, Font = Theme.Subtitle, Margin = new Padding(0, 0, 0, 6) };
+        var logCard = new FluentCard { Dock = DockStyle.Fill, RowCount = 2 };
+        logCard.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        logCard.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        logCard.Controls.Add(logTitle, 0, 0);
+        logCard.Controls.Add(_log, 0, 1);
+
+        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterWidth = 10 };
+        split.Panel1.Controls.Add(devicesCard);
+        split.Panel2.Controls.Add(logCard);
+        var gap = new Panel { Dock = DockStyle.Top, Height = 10 };
+
+        // Command bar: device actions on the left, list/laptop actions on the right.
+        var bottom = new TableLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, ColumnCount = 2, RowCount = 1, Padding = new Padding(0, 8, 0, 4) };
         bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         var deviceButtons = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Dock = DockStyle.Fill, Margin = Padding.Empty };
+        _open.Primary = true;
         deviceButtons.Controls.AddRange(new Control[] { _open, _ping, _copy });
         var listButtons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = Padding.Empty };
         listButtons.Controls.AddRange(new Control[] { _export, _removeIps });
         bottom.Controls.Add(deviceButtons, 0, 0);
         bottom.Controls.Add(listButtons, 1, 0);
 
-        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal };
-        split.Panel1.Controls.Add(_list);
-        split.Panel2.Controls.Add(_log);
-
-        var statusStrip = new StatusStrip { ShowItemToolTips = true };
+        var statusStrip = new StatusStrip { ShowItemToolTips = true, Padding = new Padding(0, 2, 0, 2) };
         statusStrip.Items.Add(_status);
         statusStrip.Items.Add(_npcap);
         statusStrip.Items.Add(_update);
         statusStrip.Items.Add(_progress);
 
-        // Docking is applied from the last control added to the first: status strip, header, buttons, then the list fills the rest.
+        // Docking is applied from the last control added to the first: status strip, header, gap, buttons, then the list fills the rest.
         Controls.Add(split);
         Controls.Add(bottom);
+        Controls.Add(gap);
         Controls.Add(header);
         Controls.Add(statusStrip);
 
-        Load += (_, _) => { split.SplitterDistance = (int)(split.Height * 0.68); FitColumns(); };
+        Theme.Apply(this);
+        Load += (_, _) => { split.SplitterDistance = (int)(split.Height * 0.66); FitColumns(); };
+    }
+
+    /// <summary>Flat column headers in the theme's colours (the classic 3D header looks out of place on Windows 11).</summary>
+    private void DrawHeader(object? sender, DrawListViewColumnHeaderEventArgs e)
+    {
+        using (var bg = new SolidBrush(Theme.Card)) e.Graphics.FillRectangle(bg, e.Bounds);
+        using (var line = new Pen(Theme.CardBorder)) e.Graphics.DrawLine(line, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
+        var text = new Rectangle(e.Bounds.X + 6, e.Bounds.Y, e.Bounds.Width - 8, e.Bounds.Height);
+        TextRenderer.DrawText(e.Graphics, e.Header?.Text, Theme.Body, text, Theme.TextSecondary,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
+    }
+
+    private void UpdateDeviceCount()
+    {
+        int n = _list.Items.Count;
+        int cams = _list.Items.Cast<ListViewItem>().Count(i => i.Tag is Device { Kind: DeviceKind.Camera });
+        _devicesCount.Text = n == 0 ? "" : $"{n} found · {cams} camera{(cams == 1 ? "" : "s")}";
+    }
+
+    private async Task TakeScreenshotsAsync(string folder)
+    {
+        Directory.CreateDirectory(folder);
+        string theme = Theme.Dark ? "dark" : "light";
+        try
+        {
+            await Task.Delay(1500);
+            Snap(this, Path.Combine(folder, $"{theme}-1-start.png"));
+            _demo.Checked = true;
+            _listen.Value = 5;
+            _find.Text = "";
+            _scanUi = ScanAsync();
+            await Task.Delay(2500);
+            Snap(this, Path.Combine(folder, $"{theme}-2-scanning.png"));
+            await _scanUi;
+            if (_engine?.Devices.FirstOrDefault(d => d.Ip.ToString() == "10.0.5.21") is { } cam) SelectRow(cam);
+            await Task.Delay(700);
+            Snap(this, Path.Combine(folder, $"{theme}-3-results.png"));
+
+            await PingSelectedAsync();
+            await Task.Delay(5000);
+            if (OwnedForms.LastOrDefault() is { } ping) { Snap(ping, Path.Combine(folder, $"{theme}-4-ping.png")); ping.Close(); }
+
+            WindowState = FormWindowState.Normal;
+            Size = MinimumSize;
+            await Task.Delay(800);
+            Snap(this, Path.Combine(folder, $"{theme}-5-smallest.png"));
+        }
+        catch (Exception ex) { File.WriteAllText(Path.Combine(folder, $"{theme}-error.txt"), ex.ToString()); }
+        finally { Close(); }
+    }
+
+    private static void Snap(Form f, string path)
+    {
+        f.TopMost = true;
+        f.Activate();
+        f.Refresh();
+        Application.DoEvents();
+        Thread.Sleep(300);
+        var b = f.Bounds;
+        using var bmp = new Bitmap(b.Width, b.Height);
+        using (var g = Graphics.FromImage(bmp)) g.CopyFromScreen(b.Location, Point.Empty, b.Size);
+        bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+        f.TopMost = false;
     }
 
     private void FitColumns()
@@ -304,6 +395,7 @@ public sealed class MainForm : Form
         }
 
         _list.Items.Clear();
+        UpdateDeviceCount();
         _rows.Clear();
         SetScanning(true);
         _cts = new CancellationTokenSource();
@@ -378,7 +470,8 @@ public sealed class MainForm : Form
         item.SubItems[4].Text = d.Mac ?? "";
         item.SubItems[5].Text = d.OpenPortsText;
         item.SubItems[6].Text = d.FoundBy;
-        item.ForeColor = d.Kind == DeviceKind.Camera ? Color.DarkBlue : SystemColors.WindowText;
+        item.ForeColor = d.Kind == DeviceKind.Camera ? Theme.CameraText : Theme.Text;
+        UpdateDeviceCount();
         UpdateButtons();
     }
 
@@ -490,7 +583,7 @@ public sealed class MainForm : Form
                 AppendLog($"Could not add a temporary IP in {reach.Range}; pinging anyway (replies are unlikely).");
 
             IPinger pinger = _demoSite != null ? _demoSite : new IcmpPinger();
-            new PingWindow(pinger, d.Ip, reach.Source, d.Description).Show(this);
+            new PingWindow(pinger, d.Ip, reach.Source, d.Description, this).Show(this);
         }
         catch (Exception ex)
         {

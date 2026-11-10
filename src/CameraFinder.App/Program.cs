@@ -3,7 +3,7 @@ namespace CameraFinder.App;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
         // Only one copy at a time: two copies would fight over the temporary addresses.
         using var mutex = new Mutex(true, @"Global\CameraFinder.SingleInstance", out bool first);
@@ -16,6 +16,9 @@ internal static class Program
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new MainForm());
+        // Hidden: --screenshot <folder> runs a demo scan and saves screenshots of the windows (used to check the UI in CI).
+        int i = Array.IndexOf(args, "--screenshot");
+        string? shots = i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
+        Application.Run(new MainForm { ScreenshotFolder = shots });
     }
 }

@@ -20,30 +20,39 @@ public sealed class PingWindow : Form
         Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, WordWrap = false,
         BackColor = Color.Black, ForeColor = Color.Gainsboro, Font = new Font("Consolas", 9.5F),
     };
-    private readonly Label _stats = new() { Dock = DockStyle.Bottom, Height = 24, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(6, 0, 0, 0) };
-    private readonly Label _state = new() { AutoSize = true, Font = new Font("Segoe UI", 10F, FontStyle.Bold), Margin = new Padding(6, 6, 12, 0) };
-    private readonly Button _startStop = new() { Text = "Stop", Width = 80 };
-    private readonly Button _copy = new() { Text = "Copy", Width = 70 };
-    private readonly Button _clear = new() { Text = "Clear", Width = 70 };
+    private readonly Label _stats = new() { Dock = DockStyle.Bottom, Height = 28, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(4, 0, 0, 0), Tag = "secondary" };
+    private readonly Label _state = new() { AutoSize = true, Margin = new Padding(4, 8, 14, 0) };
+    private readonly FluentButton _startStop = new() { Text = "Stop" };
+    private readonly FluentButton _copy = new() { Text = "Copy" };
+    private readonly FluentButton _clear = new() { Text = "Clear" };
     private CancellationTokenSource? _cts;
     private int _lines;
 
-    public PingWindow(IPinger pinger, IPAddress target, IPAddress? source, string description)
+    public PingWindow(IPinger pinger, IPAddress target, IPAddress? source, string description, Form? owner = null)
     {
         _pinger = pinger;
         _target = target;
         _source = source;
         Text = $"Ping {target}" + (string.IsNullOrWhiteSpace(description) ? "" : $" - {description}");
-        Width = 620;
-        Height = 420;
+        Width = 640;
+        Height = 440;
         StartPosition = FormStartPosition.CenterParent;
-        Font = new Font("Segoe UI", 9F);
+        Padding = new Padding(10, 8, 10, 4);
+        if (owner?.Icon != null) Icon = owner.Icon;
 
-        var bar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 36, Padding = new Padding(4, 4, 4, 0), WrapContents = false };
+        var bar = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(0, 0, 0, 6), WrapContents = false };
         bar.Controls.AddRange(new Control[] { _state, _startStop, _copy, _clear });
-        Controls.Add(_output);
+        var console = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8, 6, 4, 6), BackColor = Color.FromArgb(12, 12, 12) };
+        console.Controls.Add(_output);
+        Controls.Add(console);
         Controls.Add(_stats);
         Controls.Add(bar);
+        Theme.Apply(this);
+        _state.Font = Theme.Subtitle;
+        _output.BackColor = Color.FromArgb(12, 12, 12);
+        _output.ForeColor = Color.FromArgb(204, 204, 204);
+        _output.BorderStyle = BorderStyle.None;
+        _output.Font = Theme.Mono;
 
         _startStop.Click += (_, _) => { if (_cts == null) Start(); else Stop(); };
         _copy.Click += (_, _) =>
@@ -61,7 +70,7 @@ public sealed class PingWindow : Form
         _cts = new CancellationTokenSource();
         _startStop.Text = "Stop";
         Write($"Pinging {_target}" + (_source != null ? $" from {_source}" : "") + " every second. Close this window to stop.");
-        SetState("…", Color.DimGray);
+        SetState("…", Theme.TextSecondary);
         var ct = _cts.Token;
         _ = ContinuousPing.RunAsync(_pinger, _target, _source, ContinuousPing.DefaultInterval, ContinuousPing.DefaultTimeout,
             (r, stats, change) => Post(() => Show(r, stats, change)), ct);
@@ -90,9 +99,13 @@ public sealed class PingWindow : Form
         if (change == "UP")
             Write($"{time}  *** {_target} is UP again ***");
 
-        if (r.Success) SetState("UP", Color.ForestGreen);
-        else if (stats.IsDown || stats.Received == 0) SetState(stats.Received == 0 ? "NO REPLY" : "DOWN", Color.Firebrick);
-        else SetState("LOSING", Color.DarkOrange);
+        // Windows 11 status colours (readable on light and dark).
+        var green = Theme.Dark ? Color.FromArgb(108, 203, 95) : Color.FromArgb(15, 123, 15);
+        var red = Theme.Dark ? Color.FromArgb(255, 153, 164) : Color.FromArgb(196, 43, 28);
+        var amber = Theme.Dark ? Color.FromArgb(252, 225, 0) : Color.FromArgb(157, 93, 0);
+        if (r.Success) SetState("● UP", green);
+        else if (stats.IsDown || stats.Received == 0) SetState(stats.Received == 0 ? "● NO REPLY" : "● DOWN", red);
+        else SetState("● LOSING", amber);
         _stats.Text = stats.ToString();
     }
 
