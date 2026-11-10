@@ -96,7 +96,7 @@ public sealed class MainForm : Form
     // so the whole table is visible without a horizontal scroll bar.
     private static readonly (string Name, int Share)[] ColumnShares =
     {
-        ("IP address", 12), ("Manufacturer", 18), ("Type", 10), ("Model / name", 21), ("MAC", 14), ("Ports", 10), ("Found by", 15),
+        ("IP address", 12), ("Manufacturer", 18), ("Type", 10), ("Model / name", 20), ("MAC", 14), ("Ports", 11), ("Found by", 15),
     };
 
     private void BuildLayout()
@@ -143,6 +143,7 @@ public sealed class MainForm : Form
         // Card 2 - device list, with a title and live count.
         foreach (var (name, _) in ColumnShares) _list.Columns.Add(name, 100);
         _list.ClientSizeChanged += (_, _) => FitColumns();
+        _list.HighlightColumn = 2; // "Camera" in accent colour
         _list.SmallImageList = new ImageList { ImageSize = new Size(1, 30) }; // taller, Windows 11-like rows
         _devicesTitle.Font = Theme.Subtitle;
         var titleRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty, Dock = DockStyle.Fill };

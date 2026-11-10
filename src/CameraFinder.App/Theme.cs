@@ -376,6 +376,39 @@ internal sealed class FlatStripRenderer : ToolStripProfessionalRenderer
 /// </summary>
 internal sealed class FluentListView : ListView
 {
+    private const int WM_PAINT = 0x000F;
+    private const int LVM_GETHEADER = 0x101F;
+
+    [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] private static extern int SetWindowTheme(IntPtr hwnd, string? appName, string? idList);
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        if (!OperatingSystem.IsWindows()) return;
+        try
+        {
+            // Theme the header too, so the space right of the last column matches (it is white otherwise in dark mode).
+            IntPtr header = SendMessage(Handle, LVM_GETHEADER, IntPtr.Zero, IntPtr.Zero);
+            if (header != IntPtr.Zero) SetWindowTheme(header, Theme.Dark ? "DarkMode_ItemsView" : "ItemsView", null);
+        }
+        catch { /* older Windows */ }
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        base.WndProc(ref m);
+        if (m.Msg != WM_PAINT || View != View.Details) return;
+        // Windows draws column separator lines in the empty area below the last row; paint that area plain.
+        int top = Items.Count > 0 ? Items[Items.Count - 1].Bounds.Bottom : HeaderHeight();
+        if (top >= ClientSize.Height) return;
+        using var g = CreateGraphics();
+        using var bg = new SolidBrush(Theme.Card);
+        g.FillRectangle(bg, 0, Math.Max(top, HeaderHeight()), ClientSize.Width, ClientSize.Height - top);
+    }
+
+    private int HeaderHeight() => Items.Count > 0 ? Items[TopItem?.Index ?? 0].Bounds.Top : (int)(Font.Height * 2);
+
     public FluentListView()
     {
         DoubleBuffered = true;
@@ -409,12 +442,16 @@ internal sealed class FluentListView : ListView
         using (var accent = new SolidBrush(Theme.Accent)) g.FillPath(accent, pp);
     }
 
+    /// <summary>Column whose text takes the item's colour (e.g. "Camera" in accent); other cells use the normal text colour.</summary>
+    public int HighlightColumn { get; set; } = -1;
+
     protected override void OnDrawSubItem(DrawListViewSubItemEventArgs e)
     {
         if (e.Item is null || e.SubItem is null) return;
-        var color = e.Item.ForeColor.IsEmpty ? Theme.Text : e.Item.ForeColor;
+        bool highlight = e.ColumnIndex == HighlightColumn && !e.Item.ForeColor.IsEmpty && e.Item.ForeColor != Theme.Text;
+        var color = highlight ? e.Item.ForeColor : Theme.Text;
         var r = new Rectangle(e.Bounds.X + 8, e.Bounds.Y, Math.Max(0, e.Bounds.Width - 10), e.Bounds.Height);
-        TextRenderer.DrawText(e.Graphics, e.SubItem.Text, Font, r, color,
+        TextRenderer.DrawText(e.Graphics, e.SubItem.Text, highlight ? Theme.BodyStrong : Font, r, color,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
     }
 }
