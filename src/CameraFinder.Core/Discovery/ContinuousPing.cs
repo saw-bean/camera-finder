@@ -30,12 +30,16 @@ public sealed class IcmpPinger : IPinger
         using var ping = new Ping();
         try
         {
-            var reply = await ping.SendPingAsync(target, timeout, Payload, null, ct);
+            // Linux/macOS only allow a custom payload to privileged users; the default payload works unprivileged.
+            var reply = OperatingSystem.IsWindows()
+                ? await ping.SendPingAsync(target, timeout, Payload, null, ct)
+                : await ping.SendPingAsync(target, timeout, cancellationToken: ct);
             return reply.Status == IPStatus.Success
                 ? new PingResult(true, reply.RoundtripTime)
                 : new PingResult(false, 0, Describe(reply.Status));
         }
         catch (PingException ex) { return new PingResult(false, 0, ex.InnerException?.Message ?? ex.Message); }
+        catch (PlatformNotSupportedException ex) { return new PingResult(false, 0, ex.Message); }
     }
 
     private static string Describe(IPStatus s) => s switch
