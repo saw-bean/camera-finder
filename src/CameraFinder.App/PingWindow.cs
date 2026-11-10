@@ -23,7 +23,7 @@ public sealed class PingWindow : Form
     private readonly Label _stats = new() { Dock = DockStyle.Bottom, Height = 28, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(4, 0, 0, 0), Tag = "secondary" };
     private readonly Label _state = new() { AutoSize = true, Margin = new Padding(4, 8, 14, 0) };
     private readonly FluentButton _startStop = new() { Text = "Stop" };
-    private readonly FluentButton _copy = new() { Text = "Copy" };
+    private readonly FluentButton _copy = new() { Text = "Copy IP" };
     private readonly FluentButton _clear = new() { Text = "Clear" };
     private CancellationTokenSource? _cts;
     private int _lines;
@@ -55,10 +55,13 @@ public sealed class PingWindow : Form
         _output.Font = Theme.Mono;
 
         _startStop.Click += (_, _) => { if (_cts == null) Start(); else Stop(); };
-        _copy.Click += (_, _) =>
+        _copy.Click += async (_, _) =>
         {
-            try { Clipboard.SetText(_output.Text + Environment.NewLine + _stats.Text); }
-            catch (Exception) { /* clipboard busy */ }
+            try { Clipboard.SetText(_target.ToString()); }
+            catch (Exception) { return; } // clipboard held by another app
+            _copy.Text = "Copied ✓";     // brief confirmation, then back to normal
+            await Task.Delay(1500);
+            if (!IsDisposed) _copy.Text = "Copy IP";
         };
         _clear.Click += (_, _) => { _output.Clear(); _lines = 0; };
         Shown += (_, _) => Start();
