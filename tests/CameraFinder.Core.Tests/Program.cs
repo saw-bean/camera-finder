@@ -197,6 +197,27 @@ static class Tests
         Assert.True(probe.Contains("discovery/Probe") && probe.Contains("NetworkVideoTransmitter"), "probe text");
     }
 
+    public static void TestWsDiscoveryFromWindowsPcIsNotACamera()
+    {
+        // Real reply from a Windows 11 PC (WSDAPI, port 5357) captured on a test network: answered the untyped probe.
+        const string windows = "<?xml version=\"1.0\" encoding=\"utf-8\"?><soap:Envelope xmlns:soap=\"http://www.w3.org/2003/05/soap-envelope\" " +
+            "xmlns:wsa=\"http://schemas.xmlsoap.org/ws/2004/08/addressing\" xmlns:wsd=\"http://schemas.xmlsoap.org/ws/2005/04/discovery\" " +
+            "xmlns:wsdp=\"http://schemas.xmlsoap.org/ws/2006/02/devprof\" xmlns:pub=\"http://schemas.microsoft.com/windows/pub/2005/07\"><soap:Header>" +
+            "<wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/ProbeMatches</wsa:Action></soap:Header><soap:Body><wsd:ProbeMatches><wsd:ProbeMatch>" +
+            "<wsa:EndpointReference><wsa:Address>urn:uuid:a6dbce08-f054-45c2-8088-100fe9e6ebf6</wsa:Address></wsa:EndpointReference>" +
+            "<wsd:Types>wsdp:Device pub:Computer</wsd:Types><wsd:XAddrs>http://192.168.2.20:5357/a6dbce08-f054-45c2-8088-100fe9e6ebf6/</wsd:XAddrs>" +
+            "<wsd:MetadataVersion>16</wsd:MetadataVersion></wsd:ProbeMatch></wsd:ProbeMatches></soap:Body></soap:Envelope>";
+        var pc = OnvifProbe.Parse(IPAddress.Parse("192.168.2.20"), Encoding.UTF8.GetBytes(windows))!;
+        Assert.True(!pc.Camera, "Windows PC is not ONVIF");
+        Assert.True(OnvifProbe.Parse(IPAddress.Loopback, Encoding.UTF8.GetBytes(OnvifReply.Trim()))!.Camera, "real camera is ONVIF");
+        Assert.True(OnvifProbe.IsOnvif("tds:Device", "onvif://www.onvif.org/type/NetworkVideoStorage"), "NVR via scopes");
+        Assert.True(!OnvifProbe.IsOnvif("wsdp:Device wprt:PrintDeviceType", null), "WSD printer");
+
+        var d = new Device(IPAddress.Parse("192.168.2.20")) { Sources = DiscoverySource.WsDiscovery, Mac = "80:B6:55:EC:B1:84" };
+        Assert.Equal(DeviceKind.Other, d.Kind, "PC listed as Other, not Camera");
+        Assert.Equal("WsDiscovery", d.FoundBy);
+    }
+
     public static void TestOnvifRejectsDtd()
     {
         string evil = "<?xml version=\"1.0\"?><!DOCTYPE x [<!ENTITY e SYSTEM \"file:///etc/passwd\">]><ProbeMatch>&e;</ProbeMatch>";
@@ -592,6 +613,127 @@ static class Tests
         for (int i = 0; i < 6; i++) { e.Add(60); e.AddRange(Enumerable.Repeat((byte)'a', 60)); }
         e.Add(0); e.AddRange(new byte[10]);
         Assert.Equal(null, mdns.Parse(From, e.ToArray()), "name over 255 bytes");
+    }
+
+    // ---------- Whole scan across several IP ranges on one cable (simulated site, no real network) ----------
+    // Laptop 192.168.1.50/24. Devices sit in other ranges too; only Layer 2 connects them. The fake capture plays the
+    // traffic the laptop would hear; the fake ARP answers only when we ask from an address in the device's own range,
+    // like a real camera does; the fake joiner stands in for netsh.
+
+    sealed class SimCapture(IEnumerable<Observation> heard) : IPassiveCapture
+    {
+        public bool IsAvailable(out string? error) { error = null; return true; }
+        public string? FindDevice(string adapterId, string adapterName) => "sim0";
+        public void Listen(string device, TimeSpan duration, CancellationToken ct, Action<Observation> on) { foreach (var o in heard) on(o); }
+    }
+
+    sealed class SimJoiner : IAddressJoiner
+    {
+        public readonly List<Subnet> Joined = new();
+        public Task<IPAddress?> AddFreeAddressAsync(Adapter adapter, Subnet subnet, ISet<IPAddress> avoid, CancellationToken ct)
+        {
+            lock (Joined) Joined.Add(subnet);
+            var ip = TempAddressManager.Candidates(subnet).First(c => !avoid.Contains(c));
+            return Task.FromResult<IPAddress?>(ip);
+        }
+    }
+
+    sealed class SimArp(Dictionary<string, string> devices, Subnet? proxyRange = null) : IArpResolver
+    {
+        public bool IsSupported => true;
+        public Task<string?> ResolveAsync(IPAddress target, IPAddress source, CancellationToken ct)
+        {
+            int prefix = Ipv4.IsLinkLocal(target) ? 16 : 24;
+            if (!Subnet.Of(source, prefix).Contains(target)) return Task.FromResult<string?>(null); // not in our range: no reply
+            if (proxyRange is { } p && p.Contains(target)) return Task.FromResult<string?>("00:00:5E:00:01:01"); // router answers for all
+            return Task.FromResult(devices.TryGetValue(target.ToString(), out var m) ? m : null);
+        }
+    }
+
+    static Adapter SimLaptop() => new("sim", "Ethernet", "sim adapter", 1, "00:11:22:33:44:55", true, true,
+        new List<(IPAddress, int)> { (IPAddress.Parse("192.168.1.50"), 24) }, new List<IPAddress> { IPAddress.Parse("192.168.1.1") });
+
+    static Observation Heard(string ip, string? mac) => new(IPAddress.Parse(ip), mac);
+
+    static readonly ScanOptions SimOptions = new()
+    {
+        ListenTime = TimeSpan.FromMilliseconds(50), ProbeTime = TimeSpan.FromMilliseconds(100),
+        VendorProtocols = false, ReadDetails = false,
+    };
+
+    public static async Task TestScanFindsDevicesInOtherRanges()
+    {
+        var world = new Dictionary<string, string>
+        {
+            ["192.168.1.10"] = "44:19:B6:00:00:10",   // NVR in the laptop's own range (quiet)
+            ["10.0.5.21"] = "00:40:8C:00:00:21",      // Axis camera, heard on the wire
+            ["10.0.5.40"] = "D4:2D:C5:00:00:40",      // i-PRO camera, never transmits: only the sweep finds it
+            ["172.16.8.1"] = "00:07:5F:00:08:01",     // Bosch encoder, only seen as the target of an ARP request
+            ["172.16.8.30"] = "00:09:18:00:08:30",    // Hanwha camera, quiet
+            ["192.0.0.64"] = "44:19:B6:00:00:64",     // new Hikvision camera on its factory default address
+            ["169.254.12.34"] = "00:40:8C:00:12:34",  // camera that gave itself a link-local address
+        };
+        var heard = new[]
+        {
+            Heard("10.0.5.21", "00:40:8C:00:00:21"),
+            Heard("172.16.8.1", null),                       // someone ARPed for it
+            Heard("0.0.0.0", "44:19:B6:00:00:64"),           // filtered: not a usable host
+            Heard("192.0.0.64", "44:19:B6:00:00:64"),        // ARP probe from the Hikvision
+            Heard("169.254.12.34", "00:40:8C:00:12:34"),
+            Heard("10.0.9.5", "00:40:8C:00:09:05"),          // device behind a proxy-ARP router
+            Heard("8.8.8.8", "00:00:5E:00:01:01"),           // public address seen on the wire: never joined
+            Heard("192.168.1.50", "00:11:22:33:44:55"),      // the laptop itself: ignored
+        };
+        var joiner = new SimJoiner();
+        var engine = new ScanEngine(new SimArp(world, Subnet.Parse("10.0.9.0/24")), joiner, capture: new SimCapture(heard));
+        var log = new List<string>();
+        engine.Log += m => { lock (log) log.Add(m); };
+        await engine.RunAsync(SimLaptop(), SimOptions, CancellationToken.None);
+
+        string Dump() => string.Join("\n", engine.Devices.OrderBy(d => Ipv4.ToUInt(d.Ip)).Select(d => $"  {d.Ip} {d.Mac} [{d.FoundBy}]")) + "\nlog:\n  " + string.Join("\n  ", log);
+        var joined = joiner.Joined.Select(s => s.ToString()).OrderBy(s => s).ToList();
+        Assert.Equal("10.0.5.0/24,10.0.9.0/24,169.254.0.0/16,172.16.8.0/24,192.0.0.0/24", string.Join(",", joined), "ranges joined");
+
+        Device Find(string ip) => engine.Devices.FirstOrDefault(d => d.Ip.ToString() == ip) ?? throw new Exception($"{ip} not found:\n" + Dump());
+        Assert.True(Find("10.0.5.40").Sources.HasFlag(DiscoverySource.ArpSweep), "quiet camera in another range found by sweep");
+        Assert.True(Find("10.0.5.21").Sources.HasFlag(DiscoverySource.Passive), "heard camera");
+        Assert.Equal("00:07:5F:00:08:01", Find("172.16.8.1").Mac, "range known only from an ARP target, device then swept");
+        Assert.True(Find("172.16.8.30").Sources.HasFlag(DiscoverySource.ArpSweep), "quiet Hanwha");
+        Assert.Equal("44:19:B6:00:00:10", Find("192.168.1.10").Mac, "own-range NVR swept");
+        Assert.True(Find("192.0.0.64").Vendor!.Contains("Hikvision", StringComparison.OrdinalIgnoreCase), "Hikvision default IP, vendor " + Find("192.0.0.64").Vendor);
+        Assert.True(Find("169.254.12.34").Sources.HasFlag(DiscoverySource.ArpSweep), "link-local device confirmed by ARP");
+        Find("10.0.9.5");
+        Assert.True(!engine.Devices.Any(d => d.Mac == "00:00:5E:00:01:01" && d.Ip.ToString().StartsWith("10.0.9.")), "proxy-ARP answers dropped:\n" + Dump());
+        Assert.True(!engine.Devices.Any(d => d.Ip.ToString() is "192.168.1.50" or "0.0.0.0" || d.Ip.ToString().EndsWith(".251")), "laptop's own / temporary addresses hidden:\n" + Dump());
+        Assert.Equal(9, engine.Devices.Count, "device count:\n" + Dump());
+    }
+
+    public static async Task TestScanJoinsAtMostMaxExtraRanges()
+    {
+        var heard = Enumerable.Range(1, 9).Select(i => Heard($"10.{i}.0.5", $"00:40:8C:00:00:{i:X2}")).ToList();
+        heard.AddRange(Enumerable.Range(0, 3).Select(i => Heard($"10.9.0.{10 + i}", $"00:40:8C:00:09:{i:X2}"))); // busiest range
+        var joiner = new SimJoiner();
+        var engine = new ScanEngine(new SimArp(new()), joiner, capture: new SimCapture(heard));
+        var log = new List<string>();
+        engine.Log += m => { lock (log) log.Add(m); };
+        await engine.RunAsync(SimLaptop(), SimOptions, CancellationToken.None);
+        Assert.Equal(6, joiner.Joined.Count, "joined ranges");
+        Assert.Equal("10.9.0.0/24", joiner.Joined[0].ToString(), "busiest range first");
+        Assert.True(log.Any(l => l.Contains("Skipped 3 more range")), "skip logged: " + string.Join(" | ", log));
+    }
+
+    public static async Task TestSafeModeNeverJoinsOrSweeps()
+    {
+        var joiner = new SimJoiner();
+        var arp = new SimArp(new() { ["192.168.1.10"] = "44:19:B6:00:00:10" });
+        var engine = new ScanEngine(arp, joiner, capture: new SimCapture(new[] { Heard("10.0.5.21", "00:40:8C:00:00:21") }));
+        await engine.RunAsync(SimLaptop(), new ScanOptions
+        {
+            SafeMode = true, ListenTime = TimeSpan.FromMilliseconds(50), ProbeTime = TimeSpan.FromMilliseconds(100), VendorProtocols = false, ReadDetails = false,
+        }, CancellationToken.None);
+        Assert.Equal(0, joiner.Joined.Count, "no addresses added");
+        Assert.True(!engine.Devices.Any(d => d.Sources.HasFlag(DiscoverySource.ArpSweep)), "no sweep");
+        Assert.True(engine.Devices.Any(d => d.Ip.ToString() == "10.0.5.21"), "heard device still listed");
     }
 
     // ---------- Live tests (real sockets / capture) ----------

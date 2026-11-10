@@ -41,10 +41,11 @@ public static class OnvifProbe
     /// <summary>Parses a ProbeMatch reply. Returns null if it is not one.</summary>
     public static ProbeHit? Parse(IPAddress from, byte[] data)
     {
-        var found = SafeXml.Extract(data, new[] { "XAddrs", "Scopes" }, markers: new[] { "ProbeMatch" });
+        var found = SafeXml.Extract(data, new[] { "XAddrs", "Scopes", "Types" }, markers: new[] { "ProbeMatch" });
         if (found == null || !found.ContainsKey("ProbeMatch")) return null;
         found.TryGetValue("XAddrs", out var xaddrs);
         found.TryGetValue("Scopes", out var scopes);
+        found.TryGetValue("Types", out var types);
 
         IPAddress ip = from;
         if (xaddrs != null)
@@ -63,8 +64,18 @@ public static class OnvifProbe
         string? model = Scope(scopes, "hardware");
         string? name = Scope(scopes, "name");
         string? mfr = Scope(scopes, "mfr") ?? Scope(scopes, "manufacturer");
-        return new ProbeHit(ip, model, name, mfr, null, null);
+        return new ProbeHit(ip, model, name, mfr, null, null, Camera: IsOnvif(types, scopes));
     }
+
+    /// <summary>
+    /// WS-Discovery is not only ONVIF: Windows PCs (Types "wsdp:Device pub:Computer") and WSD printers answer the
+    /// untyped probe too. Only a reply with an ONVIF type or onvif:// scopes is a camera, recorder or encoder.
+    /// </summary>
+    public static bool IsOnvif(string? types, string? scopes) =>
+        (types != null && OnvifTypes.Any(t => types.Contains(t, StringComparison.OrdinalIgnoreCase)))
+        || (scopes != null && scopes.Contains("onvif://www.onvif.org/", StringComparison.OrdinalIgnoreCase));
+
+    private static readonly string[] OnvifTypes = { "NetworkVideoTransmitter", "NetworkVideoDisplay", "NetworkVideoStorage", "NetworkVideoAnalytics" };
 
     /// <summary>Reads e.g. "onvif://www.onvif.org/hardware/P3245-V" from the space-separated scope list.</summary>
     internal static string? Scope(string? scopes, string key)

@@ -12,6 +12,7 @@ public enum DiscoverySource
     Onvif = 4,     // answered an ONVIF WS-Discovery probe
     Ssdp = 8,      // answered a UPnP / SSDP search
     Vendor = 16,   // answered a manufacturer discovery protocol (Hikvision SADP, Dahua, Hanwha, Axis, ...)
+    WsDiscovery = 32, // answered WS-Discovery but is not ONVIF (Windows PCs, WSD printers)
 }
 
 public enum DeviceKind

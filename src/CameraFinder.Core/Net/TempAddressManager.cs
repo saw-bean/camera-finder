@@ -5,6 +5,13 @@ using System.Text.Json;
 
 namespace CameraFinder.Core.Net;
 
+/// <summary>Gives the laptop an address in another range on the same cable, so it can talk to devices there.</summary>
+public interface IAddressJoiner
+{
+    /// <summary>Adds a free address in <paramref name="subnet"/> to the adapter and returns it, or null.</summary>
+    Task<IPAddress?> AddFreeAddressAsync(Adapter adapter, Subnet subnet, ISet<IPAddress> avoid, CancellationToken ct);
+}
+
 /// <summary>
 /// Adds temporary extra IPv4 addresses to an adapter so the laptop can talk to devices in other ranges on the
 /// same cable, and removes them again. Every change is written to a state file BEFORE it is made, so if the app
@@ -15,7 +22,7 @@ namespace CameraFinder.Core.Net;
 /// Windows checks every new address for conflicts (duplicate address detection); if another device already
 /// uses the address, it is removed straight away and another one is tried.
 /// </summary>
-public sealed class TempAddressManager
+public sealed class TempAddressManager : IAddressJoiner
 {
     private readonly string _stateFile;
     private readonly Action<string> _log;

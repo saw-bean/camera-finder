@@ -29,6 +29,9 @@ public sealed class ScanOptions
     /// </summary>
     public bool VendorProtocols { get; init; } = true;
 
+    /// <summary>Check ports and read web pages of found devices (step 4). Only turned off in tests.</summary>
+    public bool ReadDetails { get; init; } = true;
+
     /// <summary>Hide the laptop itself (Windows answers its own SSDP searches). Only turned off in tests.</summary>
     public bool HideOwnAddresses { get; init; } = true;
 }
@@ -43,8 +46,9 @@ public sealed class ScanOptions
 public sealed class ScanEngine
 {
     private readonly IArpResolver _arp;
-    private readonly TempAddressManager? _temp;
+    private readonly IAddressJoiner? _temp;
     private readonly OuiDatabase _oui;
+    private readonly IPassiveCapture _capture;
     private readonly ConcurrentDictionary<IPAddress, Device> _devices = new();
     private readonly ConcurrentDictionary<IPAddress, string> _ssdpDescriptions = new();
     private readonly ConcurrentDictionary<IPAddress, byte> _mentioned = new(); // IPs seen without a MAC (range hints)
@@ -55,11 +59,12 @@ public sealed class ScanEngine
     public event Action<Device>? DeviceChanged;
     public event Action<string, int>? Progress; // phase text, percent 0-100
 
-    public ScanEngine(IArpResolver arp, TempAddressManager? temp, OuiDatabase? oui = null)
+    public ScanEngine(IArpResolver arp, IAddressJoiner? temp, OuiDatabase? oui = null, IPassiveCapture? capture = null)
     {
         _arp = arp;
         _temp = temp;
         _oui = oui ?? OuiDatabase.Default;
+        _capture = capture ?? NpcapCapture.Instance;
     }
 
     public IReadOnlyCollection<Device> Devices => _devices.Values.ToList();
@@ -77,15 +82,15 @@ public sealed class ScanEngine
         // ---- 1. Listen + probe -------------------------------------------------------------------------
         Report("Listening and probing", 0);
         Task listen = Task.CompletedTask;
-        if (PassiveListener.IsAvailable(out var why))
+        if (_capture.IsAvailable(out var why))
         {
-            string? dev = PassiveListener.FindDevice(adapter.Id, adapter.Name);
+            string? dev = _capture.FindDevice(adapter.Id, adapter.Name);
             if (dev != null)
             {
                 Say($"Listening passively for {options.ListenTime.TotalSeconds:0} s...");
                 listen = Task.Run(() =>
                 {
-                    try { PassiveListener.Listen(dev, options.ListenTime, ct, o => OnObservation(o, ownAddresses)); }
+                    try { _capture.Listen(dev, options.ListenTime, ct, o => OnObservation(o, ownAddresses)); }
                     catch (Exception ex) { Say("Passive listening stopped: " + ex.Message); }
                 }, ct);
             }
@@ -176,7 +181,8 @@ public sealed class ScanEngine
 
         // ---- 4. Details -------------------------------------------------------------------------------------
         var list = _devices.Values.ToList();
-        Say($"Reading details from {list.Count} device(s)...");
+        if (!options.ReadDetails) list.Clear();
+        else Say($"Reading details from {list.Count} device(s)...");
         int doneCount = 0;
         using (var enricher = new DeviceEnricher())
         using (var gate = new SemaphoreSlim(16))
@@ -199,7 +205,8 @@ public sealed class ScanEngine
         }
 
         Report("Done", 100);
-        Say($"Scan finished: {list.Count} device(s), {list.Count(d => d.Kind == DeviceKind.Camera)} camera(s).");
+        var all = _devices.Values.ToList();
+        Say($"Scan finished: {all.Count} device(s), {all.Count(d => d.Kind == DeviceKind.Camera)} camera(s).");
     }
 
     private async Task ProbeAllAsync(IEnumerable<IPAddress> sources, ScanOptions options, CancellationToken ct)
@@ -210,7 +217,7 @@ public sealed class ScanEngine
             tasks.Add(MulticastProbe.RunAsync(src, OnvifProbe.Group, OnvifProbe.Probes(), options.ProbeTime, (from, data) =>
             {
                 var hit = OnvifProbe.Parse(from.Address, data);
-                if (hit != null) Merge(hit, DiscoverySource.Onvif);
+                if (hit != null) Merge(hit, hit.Camera ? DiscoverySource.Onvif : DiscoverySource.WsDiscovery);
             }, ct));
             tasks.Add(MulticastProbe.RunAsync(src, SsdpProbe.Group, SsdpProbe.Probes(), options.ProbeTime, (from, data) =>
             {
@@ -238,7 +245,7 @@ public sealed class ScanEngine
 
     private void OnObservation(Observation o, HashSet<IPAddress> own)
     {
-        if (own.Contains(o.Ip)) return;
+        if (own.Contains(o.Ip) || !Ipv4.IsUsableHost(o.Ip)) return;
         if (o.Mac == null) { _mentioned.TryAdd(o.Ip, 0); return; }
         Upsert(o.Ip, o.Mac, DiscoverySource.Passive);
     }

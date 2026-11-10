@@ -3,6 +3,24 @@ using System.Runtime.InteropServices;
 
 namespace CameraFinder.Core.Capture;
 
+/// <summary>Passive traffic capture used by the scan. The real one is Npcap/libpcap (<see cref="NpcapCapture"/>).</summary>
+public interface IPassiveCapture
+{
+    bool IsAvailable(out string? error);
+    string? FindDevice(string adapterId, string adapterName);
+    void Listen(string device, TimeSpan duration, CancellationToken ct, Action<Observation> onObservation);
+}
+
+/// <summary><see cref="IPassiveCapture"/> backed by <see cref="PassiveListener"/>.</summary>
+public sealed class NpcapCapture : IPassiveCapture
+{
+    public static readonly NpcapCapture Instance = new();
+    public bool IsAvailable(out string? error) => PassiveListener.IsAvailable(out error);
+    public string? FindDevice(string adapterId, string adapterName) => PassiveListener.FindDevice(adapterId, adapterName);
+    public void Listen(string device, TimeSpan duration, CancellationToken ct, Action<Observation> onObservation) =>
+        PassiveListener.Listen(device, duration, ct, onObservation);
+}
+
 /// <summary>
 /// Listens to raw traffic on one adapter using Npcap (Windows) or libpcap (Linux), without sending anything.
 /// Npcap is optional: when it is not installed, <see cref="IsAvailable"/> is false and the rest of the app still works.
