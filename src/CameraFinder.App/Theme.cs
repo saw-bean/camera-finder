@@ -26,11 +26,14 @@ internal static class Theme
     public static Color AccentPressed { get; private set; }
     public static Color OnAccent { get; private set; }     // text on accent fill
     public static Color CameraText { get; private set; }   // camera rows in the device list
+    public static Color SelectedRow { get; private set; }  // list selection (accent tint)
 
     public static Font Body { get; private set; } = SystemFonts.MessageBoxFont!;
     public static Font BodyStrong { get; private set; } = SystemFonts.MessageBoxFont!;
     public static Font Subtitle { get; private set; } = SystemFonts.MessageBoxFont!;
     public static Font Mono { get; private set; } = new("Consolas", 9F);
+    /// <summary>Windows icon font (Segoe Fluent Icons on Windows 11, MDL2 Assets on 10), or null.</summary>
+    public static Font? Icons { get; private set; }
 
     static Theme() => Load();
 
@@ -49,6 +52,7 @@ internal static class Theme
         BodyStrong = new Font(family, 9.75F, FontStyle.Bold);
         Subtitle = new Font(display, 11F, FontStyle.Bold);
         Mono = new Font(FirstInstalled("Cascadia Mono", "Consolas") ?? "Courier New", 9F);
+        Icons = FirstInstalled("Segoe Fluent Icons", "Segoe MDL2 Assets") is { } icons ? new Font(icons, 10F) : null;
 
         var accent = ReadAccent() ?? Color.FromArgb(0, 95, 184);
         if (Dark)
@@ -79,11 +83,12 @@ internal static class Theme
             TextSecondary = Color.FromArgb(96, 96, 96);
             TextDisabled = Color.FromArgb(160, 160, 160);
             Accent = Luminance(accent) > 0.45 ? Darken(accent, 0.35) : accent; // keep white text readable
-            CameraText = Luminance(accent) > 0.35 ? Darken(accent, 0.45) : accent;
+            CameraText = Luminance(accent) > 0.45 ? Darken(accent, 0.35) : accent;
         }
         AccentHover = Dark ? Darken(Accent, 0.1) : Lighten(Accent, 0.1);
         AccentPressed = Dark ? Darken(Accent, 0.2) : Lighten(Accent, 0.2);
         OnAccent = Luminance(Accent) > 0.5 ? Color.Black : Color.White;
+        SelectedRow = Blend(Card, Accent, Dark ? 0.22 : 0.12);
     }
 
     // ------------------------------------------------------------------ applying to controls
@@ -132,9 +137,8 @@ internal static class Theme
                 tb.BorderStyle = BorderStyle.FixedSingle;
                 break;
             case ComboBox cb:
-                cb.FlatStyle = FlatStyle.Flat;
-                cb.BackColor = Control;
-                cb.ForeColor = Text;
+                cb.FlatStyle = FlatStyle.Standard; // keeps the Windows-drawn (and dark-themable) look
+                if (Dark) { cb.BackColor = Control; cb.ForeColor = Text; }
                 Native(cb, () => SetWindowTheme(cb.Handle, Dark ? "DarkMode_CFD" : "Explorer", null));
                 break;
             case NumericUpDown n:
@@ -212,6 +216,8 @@ internal static class Theme
     private static double Luminance(Color c) => (0.2126 * c.R + 0.7152 * c.G + 0.0722 * c.B) / 255.0;
     private static Color Lighten(Color c, double t) =>
         Color.FromArgb((int)(c.R + (255 - c.R) * t), (int)(c.G + (255 - c.G) * t), (int)(c.B + (255 - c.B) * t));
+    private static Color Blend(Color a, Color b, double t) =>
+        Color.FromArgb((int)(a.R + (b.R - a.R) * t), (int)(a.G + (b.G - a.G) * t), (int)(a.B + (b.B - a.B) * t));
     private static Color Darken(Color c, double t) =>
         Color.FromArgb((int)(c.R * (1 - t)), (int)(c.G * (1 - t)), (int)(c.B * (1 - t)));
 
@@ -362,4 +368,53 @@ internal sealed class FlatStripRenderer : ToolStripProfessionalRenderer
 {
     protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e) => e.Graphics.Clear(Theme.Background);
     protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) { }
+}
+
+/// <summary>
+/// Device list drawn the Windows 11 way: no grid lines, padded text, a soft accent-tinted selection with an accent
+/// pill on the left. Double-buffered so updates during a scan do not flicker.
+/// </summary>
+internal sealed class FluentListView : ListView
+{
+    public FluentListView()
+    {
+        DoubleBuffered = true;
+        OwnerDraw = true;
+        View = View.Details;
+        FullRowSelect = true;
+        GridLines = false;
+        HeaderStyle = ColumnHeaderStyle.Clickable;
+    }
+
+    protected override void OnDrawColumnHeader(DrawListViewColumnHeaderEventArgs e)
+    {
+        using (var bg = new SolidBrush(Theme.Card)) e.Graphics.FillRectangle(bg, e.Bounds);
+        using (var line = new Pen(Theme.CardBorder)) e.Graphics.DrawLine(line, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
+        var text = new Rectangle(e.Bounds.X + 8, e.Bounds.Y, e.Bounds.Width - 10, e.Bounds.Height);
+        TextRenderer.DrawText(e.Graphics, e.Header?.Text, Theme.Body, text, Theme.TextSecondary,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
+    }
+
+    protected override void OnDrawItem(DrawListViewItemEventArgs e)
+    {
+        var g = e.Graphics;
+        using (var bg = new SolidBrush(Theme.Card)) g.FillRectangle(bg, e.Bounds);
+        if (!e.Item.Selected) return;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var r = new RectangleF(e.Bounds.X + 2, e.Bounds.Y + 1, e.Bounds.Width - 4, e.Bounds.Height - 2);
+        using (var path = Theme.RoundedRect(r, 4))
+        using (var sel = new SolidBrush(Theme.SelectedRow)) g.FillPath(sel, path);
+        var pill = new RectangleF(e.Bounds.X + 2, e.Bounds.Y + e.Bounds.Height * 0.25f, 3, e.Bounds.Height * 0.5f);
+        using (var pp = Theme.RoundedRect(pill, 1.5f))
+        using (var accent = new SolidBrush(Theme.Accent)) g.FillPath(accent, pp);
+    }
+
+    protected override void OnDrawSubItem(DrawListViewSubItemEventArgs e)
+    {
+        if (e.Item is null || e.SubItem is null) return;
+        var color = e.Item.ForeColor.IsEmpty ? Theme.Text : e.Item.ForeColor;
+        var r = new Rectangle(e.Bounds.X + 8, e.Bounds.Y, Math.Max(0, e.Bounds.Width - 10), e.Bounds.Height);
+        TextRenderer.DrawText(e.Graphics, e.SubItem.Text, Font, r, color,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+    }
 }

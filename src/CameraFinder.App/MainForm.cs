@@ -17,15 +17,12 @@ public sealed class MainForm : Form
     private readonly CheckBox _safeMode = new() { Text = "Safe mode", AutoSize = true, Margin = new Padding(14, 6, 3, 0) };
     private readonly TextBox _find = new() { Width = 190, PlaceholderText = "IP or MAC", Margin = new Padding(3, 4, 3, 3) };
     private readonly CheckBox _demo = new() { Text = "Demo (test site)", AutoSize = true, Margin = new Padding(10, 6, 3, 0) };
-    private readonly NumericUpDown _listen = new() { Minimum = 5, Maximum = 300, Value = 30, Width = 55, Margin = new Padding(3, 4, 3, 3) };
+    private readonly ComboBox _listen = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 70, Margin = new Padding(3, 5, 3, 3) };
+    private int ListenSeconds => _listen.SelectedItem is int s ? s : 30;
     private readonly FluentButton _scan = Btn("Scan", minWidth: 90, bold: true);
     private readonly FluentButton _stop = Btn("Stop", minWidth: 70, enabled: false);
 
-    private readonly ListView _list = new()
-    {
-        View = View.Details, FullRowSelect = true, GridLines = false, MultiSelect = false, OwnerDraw = true,
-        Dock = DockStyle.Fill, HideSelection = false,
-    };
+    private readonly FluentListView _list = new() { MultiSelect = false, Dock = DockStyle.Fill, HideSelection = false };
 
     private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, BackColor = SystemColors.Window };
     private readonly FluentButton _open = Btn("Open web page", enabled: false);
@@ -64,7 +61,7 @@ public sealed class MainForm : Form
         Text = $"Camera Finder {UpdateChecker.CurrentVersion.ToString(3)}";
         Width = 1000;
         Height = 680;
-        MinimumSize = new Size(760, 480);
+        MinimumSize = new Size(780, 560);
         StartPosition = FormStartPosition.CenterScreen;
         Font = Theme.Body;
         using (var ico = typeof(MainForm).Assembly.GetManifestResourceStream("CameraFinder.App.app.ico"))
@@ -99,7 +96,7 @@ public sealed class MainForm : Form
     // so the whole table is visible without a horizontal scroll bar.
     private static readonly (string Name, int Share)[] ColumnShares =
     {
-        ("IP address", 11), ("Manufacturer", 19), ("Type", 8), ("Model / name", 22), ("MAC", 13), ("Ports", 10), ("Found by", 17),
+        ("IP address", 12), ("Manufacturer", 18), ("Type", 10), ("Model / name", 21), ("MAC", 14), ("Ports", 10), ("Found by", 15),
     };
 
     private void BuildLayout()
@@ -116,6 +113,7 @@ public sealed class MainForm : Form
         row1.Controls.Add(Caption("Adapter"), 0, 0);
         row1.Controls.Add(_adapters, 1, 0);
         _refresh.MinimumSize = new Size(36, 32);
+        if (Theme.Icons != null) { _refresh.Font = Theme.Icons; _refresh.Text = "\uE72C"; } // Refresh icon
         row1.Controls.Add(_refresh, 2, 0);
         _scan.Margin = new Padding(14, 3, 3, 3);
         row1.Controls.Add(_scan, 3, 0);
@@ -123,6 +121,8 @@ public sealed class MainForm : Form
 
         // Row 2: options. Wraps onto another line rather than hiding anything if the window is narrow.
         var row2 = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true, Margin = new Padding(0, 4, 0, 0) };
+        foreach (int sec in new[] { 5, 10, 20, 30, 60, 120, 300 }) _listen.Items.Add(sec);
+        _listen.SelectedItem = 30;
         row2.Controls.AddRange(new Control[] { Caption("Listen (s)"), _listen, Caption("Stop when found", 16), _find, _safeMode, _demo });
 
         var header = new FluentCard { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, RowCount = 2 };
@@ -144,9 +144,6 @@ public sealed class MainForm : Form
         foreach (var (name, _) in ColumnShares) _list.Columns.Add(name, 100);
         _list.ClientSizeChanged += (_, _) => FitColumns();
         _list.SmallImageList = new ImageList { ImageSize = new Size(1, 30) }; // taller, Windows 11-like rows
-        _list.DrawColumnHeader += DrawHeader;
-        _list.DrawItem += (_, e) => e.DrawDefault = true;
-        _list.DrawSubItem += (_, e) => e.DrawDefault = true;
         _devicesTitle.Font = Theme.Subtitle;
         var titleRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty, Dock = DockStyle.Fill };
         titleRow.Controls.AddRange(new Control[] { _devicesTitle, _devicesCount });
@@ -186,6 +183,7 @@ public sealed class MainForm : Form
         statusStrip.Items.Add(_npcap);
         statusStrip.Items.Add(_update);
         statusStrip.Items.Add(_progress);
+        _progress.Visible = false;
 
         // Docking is applied from the last control added to the first: status strip, header, gap, buttons, then the list fills the rest.
         Controls.Add(split);
@@ -196,16 +194,6 @@ public sealed class MainForm : Form
 
         Theme.Apply(this);
         Load += (_, _) => { split.SplitterDistance = (int)(split.Height * 0.66); FitColumns(); };
-    }
-
-    /// <summary>Flat column headers in the theme's colours (the classic 3D header looks out of place on Windows 11).</summary>
-    private void DrawHeader(object? sender, DrawListViewColumnHeaderEventArgs e)
-    {
-        using (var bg = new SolidBrush(Theme.Card)) e.Graphics.FillRectangle(bg, e.Bounds);
-        using (var line = new Pen(Theme.CardBorder)) e.Graphics.DrawLine(line, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
-        var text = new Rectangle(e.Bounds.X + 6, e.Bounds.Y, e.Bounds.Width - 8, e.Bounds.Height);
-        TextRenderer.DrawText(e.Graphics, e.Header?.Text, Theme.Body, text, Theme.TextSecondary,
-            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
     }
 
     private void UpdateDeviceCount()
@@ -224,7 +212,7 @@ public sealed class MainForm : Form
             await Task.Delay(1500);
             Snap(this, Path.Combine(folder, $"{theme}-1-start.png"));
             _demo.Checked = true;
-            _listen.Value = 5;
+            _listen.SelectedItem = 5;
             _find.Text = "";
             _scanUi = ScanAsync();
             await Task.Delay(2500);
@@ -263,7 +251,8 @@ public sealed class MainForm : Form
 
     private void FitColumns()
     {
-        int width = _list.ClientSize.Width - 2;
+        // Always leave room for the vertical scroll bar, so adding rows never brings up a horizontal one.
+        int width = _list.Width - SystemInformation.VerticalScrollBarWidth - 4;
         if (width < 200 || _list.Columns.Count != ColumnShares.Length) return;
         int used = 0;
         for (int i = 0; i < ColumnShares.Length; i++)
@@ -374,7 +363,7 @@ public sealed class MainForm : Form
         {
             _demoSite = new DemoSite();
             adapter = _demoSite.Laptop;
-            options = DemoSite.Options(TimeSpan.FromSeconds(Math.Min(8, (double)_listen.Value)), _safeMode.Checked);
+            options = DemoSite.Options(TimeSpan.FromSeconds(Math.Min(8, ListenSeconds)), _safeMode.Checked);
             _engine = new ScanEngine(_demoSite, _demoSite, capture: _demoSite, readDetails: _demoSite.ReadDetailsAsync);
             var site = _demoSite;
             _web = new WebPageAccess(site, () => site.Laptop, site.ReadDetailsAsync);
@@ -385,7 +374,7 @@ public sealed class MainForm : Form
             if (_adapters.SelectedItem is not Adapter picked) { AppendLog("Pick an adapter first."); return; }
             // Refresh the adapter: its addresses may have changed since the list was loaded.
             adapter = Adapter.List().FirstOrDefault(a => a.Id == picked.Id) ?? picked;
-            options = new ScanOptions { SafeMode = _safeMode.Checked, ListenTime = TimeSpan.FromSeconds((double)_listen.Value) };
+            options = new ScanOptions { SafeMode = _safeMode.Checked, ListenTime = TimeSpan.FromSeconds(ListenSeconds) };
             _demoSite = null;
             _engine = new ScanEngine(new WindowsArpResolver(), _temp);
             string adapterId = adapter.Id;
@@ -666,6 +655,7 @@ public sealed class MainForm : Form
         _listen.Enabled = !scanning;
         _removeIps.Enabled = !scanning;
         if (!scanning) _progress.Value = 0;
+        _progress.Visible = scanning;
     }
 
     /// <summary>The device the user is looking for has appeared: stop the scan, keep the list, select it.</summary>
