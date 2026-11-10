@@ -37,6 +37,12 @@ public static class Ipv4
             || (v & 0xFFFF0000u) == 0xC0A80000u;     // 192.168/16
     }
 
+    /// <summary>
+    /// Ranges the scan may join with a temporary address: the private ranges, plus 192.0.0.0/24, which is not
+    /// routed on the internet and is where Hikvision cameras sit out of the box (192.0.0.64).
+    /// </summary>
+    public static bool IsJoinable(IPAddress ip) => IsPrivate(ip) || (ToUInt(ip) & 0xFFFFFF00u) == 0xC0000000u;
+
     /// <summary>True for addresses that should never be treated as a device: 0.0.0.0, broadcast, multicast, loopback.</summary>
     public static bool IsUsableHost(IPAddress ip)
     {
@@ -62,7 +68,12 @@ public readonly record struct Subnet(uint Network, int Prefix)
     public static Subnet Parse(string cidr)
     {
         var parts = cidr.Split('/');
-        return Of(IPAddress.Parse(parts[0]), parts.Length > 1 ? int.Parse(parts[1]) : 24);
+        if (parts.Length > 2) throw new FormatException($"Not an IPv4 subnet: {cidr}");
+        int prefix = parts.Length > 1 ? int.Parse(parts[1]) : 24;
+        if (prefix is < 0 or > 32) throw new FormatException($"Prefix must be 0-32: {cidr}");
+        var ip = IPAddress.Parse(parts[0]);
+        if (ip.AddressFamily != AddressFamily.InterNetwork) throw new FormatException($"Not an IPv4 subnet: {cidr}");
+        return Of(ip, prefix);
     }
 
     public uint Mask => Ipv4.MaskFromPrefix(Prefix);

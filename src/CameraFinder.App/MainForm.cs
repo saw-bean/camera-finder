@@ -113,7 +113,12 @@ public sealed class MainForm : Form
         _list.DoubleClick += (_, _) => OpenSelected();
         _list.ColumnClick += (_, e) => Sort(e.Column);
         _open.Click += (_, _) => OpenSelected();
-        _copy.Click += (_, _) => { if (Selected() is { } d) Clipboard.SetText(d.Ip.ToString()); };
+        _copy.Click += (_, _) =>
+        {
+            if (Selected() is not { } d) return;
+            try { Clipboard.SetText(d.Ip.ToString()); }
+            catch (Exception ex) { AppendLog("Could not copy to the clipboard: " + ex.Message); } // clipboard held by another app
+        };
         _export.Click += (_, _) => Export();
         _removeIps.Click += (_, _) => RemoveTemporaryAddresses();
         _npcap.LinkClicked += (_, _) => OpenUrl(PassiveListener.NpcapDownloadUrl);
@@ -206,8 +211,9 @@ public sealed class MainForm : Form
 
         _engine = new ScanEngine(new WindowsArpResolver(), _temp);
         _engine.Log += AppendLog;
-        _engine.DeviceChanged += d => BeginInvoke(new MethodInvoker(() => UpsertRow(d)));
-        _engine.Progress += (phase, pct) => BeginInvoke(new MethodInvoker(() => { _status.Text = phase; _progress.Value = pct; }));
+        var engine = _engine;
+        _engine.DeviceChanged += d => Post(() => { if (_engine == engine) UpsertRow(d); });
+        _engine.Progress += (phase, pct) => Post(() => { if (_engine == engine) { _status.Text = phase; _progress.Value = pct; } });
 
         try
         {
@@ -251,7 +257,7 @@ public sealed class MainForm : Form
         item.SubItems[2].Text = d.Kind == DeviceKind.Unknown ? "" : d.Kind.ToString();
         item.SubItems[3].Text = d.Description;
         item.SubItems[4].Text = d.Mac ?? "";
-        item.SubItems[5].Text = string.Join(" ", d.OpenPorts);
+        item.SubItems[5].Text = d.OpenPortsText;
         item.SubItems[6].Text = d.FoundBy;
         item.ForeColor = d.Kind == DeviceKind.Camera ? Color.DarkBlue : SystemColors.WindowText;
         UpdateButtons();
@@ -286,7 +292,11 @@ public sealed class MainForm : Form
     {
         if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) return;
         try { Process.Start(new ProcessStartInfo("explorer.exe", "\"" + url + "\"") { UseShellExecute = false }); }
-        catch { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
+        catch
+        {
+            try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
+            catch (Exception ex) { MessageBox.Show("Could not open " + url + ": " + ex.Message, "Camera Finder", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+        }
     }
 
     private void Export()
@@ -298,8 +308,18 @@ public sealed class MainForm : Form
             FileName = $"devices-{DateTime.Now:yyyy-MM-dd-HHmm}.csv",
         };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
-        File.WriteAllText(dlg.FileName, CsvExporter.ToCsv(_engine.Devices), new System.Text.UTF8Encoding(true));
-        AppendLog("Saved " + dlg.FileName);
+        try
+        {
+            File.WriteAllText(dlg.FileName, CsvExporter.ToCsv(_engine.Devices), new System.Text.UTF8Encoding(true));
+            AppendLog("Saved " + dlg.FileName);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Typically the previous export is still open in Excel, which locks the file.
+            AppendLog("Could not save: " + ex.Message);
+            MessageBox.Show(this, "Could not save the file. If it is open in Excel, close it and try again.\n\n" + ex.Message,
+                "Export CSV", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 
     private void RemoveTemporaryAddresses()
@@ -342,8 +362,20 @@ public sealed class MainForm : Form
 
     private void AppendLog(string message)
     {
-        if (InvokeRequired) { BeginInvoke(new MethodInvoker(() => AppendLog(message))); return; }
+        if (InvokeRequired) { Post(() => AppendLog(message)); return; }
+        if (IsDisposed || _log.IsDisposed) return;
         _log.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
+    }
+
+    /// <summary>
+    /// Runs <paramref name="action"/> on the UI thread. Scan threads can still report for a moment after the window
+    /// closes; BeginInvoke on a closed window throws, which would otherwise crash the app on a background thread.
+    /// </summary>
+    private void Post(Action action)
+    {
+        if (IsDisposed || Disposing || !IsHandleCreated) return;
+        try { BeginInvoke(new MethodInvoker(() => { if (!IsDisposed) action(); })); }
+        catch (InvalidOperationException) { /* window is closing */ }
     }
 
     private sealed class RowComparer(int column) : System.Collections.IComparer

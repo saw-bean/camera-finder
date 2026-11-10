@@ -381,7 +381,7 @@ public static class VendorProbes
     private static string ReadDnsName(byte[] data, ref int pos)
     {
         var labels = new List<string>();
-        int p = pos, jumps = 0;
+        int p = pos, jumps = 0, total = 0;
         bool jumped = false;
         while (true)
         {
@@ -396,6 +396,9 @@ public static class VendorProbes
                 p = target;
                 continue;
             }
+            // RFC 1035: labels are at most 63 bytes (0x40-0xBF are reserved types), names at most 255 bytes.
+            if (len > 63) throw new IndexOutOfRangeException("bad DNS label");
+            if ((total += len + 1) > 255) throw new IndexOutOfRangeException("DNS name too long");
             labels.Add(Encoding.UTF8.GetString(data, p + 1, len));
             p += 1 + len;
         }

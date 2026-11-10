@@ -28,7 +28,7 @@ public sealed class DeviceEnricher : IDisposable
             UseCookies = false,
             UseDefaultCredentials = false,
         };
-        _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(4) };
+        _http = new HttpClient(handler) { Timeout = RequestTimeout };
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("CameraFinder/1.0");
     }
 
@@ -87,10 +87,19 @@ public sealed class DeviceEnricher : IDisposable
         return results.Where(r => r.open).Select(r => r.port).OrderBy(p => p).ToList();
     }
 
+    /// <summary>
+    /// Whole-request limit. HttpClient.Timeout only covers the headers when reading with ResponseHeadersRead, so a
+    /// device that sends its page very slowly would otherwise hold up the scan forever.
+    /// </summary>
+    public static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
+
     private async Task<(string? Title, string? Server)> ReadPageAsync(string url, CancellationToken ct)
     {
         try
         {
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            limit.CancelAfter(RequestTimeout);
+            ct = limit.Token;
             using var resp = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
             string? server = resp.Headers.Server.Count > 0 ? resp.Headers.Server.ToString() : null;
             string html = await ReadLimitedAsync(resp, 64 * 1024, ct);
@@ -101,6 +110,9 @@ public sealed class DeviceEnricher : IDisposable
 
     private async Task<string> GetLimitedAsync(string url, int max, CancellationToken ct)
     {
+        using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        limit.CancelAfter(RequestTimeout);
+        ct = limit.Token;
         using var resp = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
         return await ReadLimitedAsync(resp, max, ct);
     }
@@ -114,13 +126,29 @@ public sealed class DeviceEnricher : IDisposable
         return Encoding.UTF8.GetString(buf, 0, total);
     }
 
+    /// <summary>
+    /// Text of the first &lt;title&gt; element, whitespace collapsed, at most 80 characters.
+    /// Plain index search, not a backtracking regex: a hostile or broken page must not hang the scan.
+    /// </summary>
     public static string? ExtractTitle(string html)
     {
-        var m = Regex.Match(html, @"<title[^>]*>\s*(.*?)\s*</title>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
-        if (!m.Success) return null;
-        string t = WebUtility.HtmlDecode(Regex.Replace(m.Groups[1].Value, @"\s+", " ")).Trim();
+        int open = html.IndexOf("<title", StringComparison.OrdinalIgnoreCase);
+        while (open >= 0)
+        {
+            int after = open + "<title".Length;
+            if (after < html.Length && (html[after] == '>' || char.IsWhiteSpace(html[after]))) break;
+            open = html.IndexOf("<title", after, StringComparison.OrdinalIgnoreCase);
+        }
+        if (open < 0) return null;
+        int gt = html.IndexOf('>', open);
+        if (gt < 0) return null;
+        int close = html.IndexOf("</title", gt + 1, StringComparison.OrdinalIgnoreCase);
+        if (close < 0) return null;
+        string t = WebUtility.HtmlDecode(WhitespaceRun.Replace(html[(gt + 1)..close], " ")).Trim();
         return t.Length == 0 ? null : t.Length > 80 ? t[..80] : t;
     }
+
+    private static readonly Regex WhitespaceRun = new(@"\s+", RegexOptions.Compiled);
 
     public void Dispose() => _http.Dispose();
 }

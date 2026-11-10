@@ -44,26 +44,41 @@ public sealed class Device
     /// <summary>Set when a camera/recorder-only protocol (ONVIF or a camera maker's own) found the device.</summary>
     public bool CameraProtocol { get; set; }
 
+    // The scan engine updates a device from several threads while holding lock(device); the readers below take the
+    // same lock so the UI can show a device mid-scan without "collection was modified" errors.
+
     /// <summary>How it was found, for the list and CSV: "ArpSweep, Onvif, Hikvision SADP".</summary>
     public string FoundBy
     {
         get
         {
-            var parts = Enum.GetValues<DiscoverySource>()
-                .Where(s => s != DiscoverySource.None && s != DiscoverySource.Vendor && Sources.HasFlag(s))
-                .Select(s => s.ToString())
-                .Concat(Protocols);
-            return string.Join(", ", parts);
+            lock (this)
+            {
+                var parts = Enum.GetValues<DiscoverySource>()
+                    .Where(s => s != DiscoverySource.None && s != DiscoverySource.Vendor && Sources.HasFlag(s))
+                    .Select(s => s.ToString())
+                    .Concat(Protocols);
+                return string.Join(", ", parts);
+            }
         }
+    }
+
+    /// <summary>Open ports as text, e.g. "80 443 554".</summary>
+    public string OpenPortsText
+    {
+        get { lock (this) return string.Join(" ", OpenPorts); }
     }
 
     public DeviceKind Kind
     {
         get
         {
-            if (Sources.HasFlag(DiscoverySource.Onvif) || CameraProtocol || OpenPorts.Contains(554)) return DeviceKind.Camera;
-            if (WebUrl != null) return DeviceKind.WebDevice;
-            return Mac != null ? DeviceKind.Other : DeviceKind.Unknown;
+            lock (this)
+            {
+                if (Sources.HasFlag(DiscoverySource.Onvif) || CameraProtocol || OpenPorts.Contains(554)) return DeviceKind.Camera;
+                if (WebUrl != null) return DeviceKind.WebDevice;
+                return Mac != null ? DeviceKind.Other : DeviceKind.Unknown;
+            }
         }
     }
 

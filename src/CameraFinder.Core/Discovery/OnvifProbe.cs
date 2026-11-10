@@ -41,24 +41,15 @@ public static class OnvifProbe
     /// <summary>Parses a ProbeMatch reply. Returns null if it is not one.</summary>
     public static ProbeHit? Parse(IPAddress from, byte[] data)
     {
-        var doc = new XmlDocument { XmlResolver = null };
-        try
-        {
-            using var reader = XmlReader.Create(new MemoryStream(data),
-                new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null });
-            doc.Load(reader);
-        }
-        catch (XmlException) { return null; }
-
-        if (doc.GetElementsByTagName("ProbeMatch", "*").Count == 0 && FindLocal(doc, "ProbeMatch") == null) return null;
-
-        string? xaddrs = FindLocal(doc, "XAddrs")?.InnerText;
-        string? scopes = FindLocal(doc, "Scopes")?.InnerText;
+        var found = SafeXml.Extract(data, new[] { "XAddrs", "Scopes" }, markers: new[] { "ProbeMatch" });
+        if (found == null || !found.ContainsKey("ProbeMatch")) return null;
+        found.TryGetValue("XAddrs", out var xaddrs);
+        found.TryGetValue("Scopes", out var scopes);
 
         IPAddress ip = from;
         if (xaddrs != null)
         {
-            foreach (var url in xaddrs.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            foreach (var url in xaddrs.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
             {
                 if (Uri.TryCreate(url, UriKind.Absolute, out var u) && IPAddress.TryParse(u.Host, out var a)
                     && a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
@@ -90,15 +81,83 @@ public static class OnvifProbe
         }
         return null;
     }
+}
 
-    private static XmlNode? FindLocal(XmlNode node, string localName)
+/// <summary>
+/// Reads small XML documents from devices (ONVIF replies, UPnP descriptions) without building a DOM.
+/// Streaming and depth-limited, so a hostile packet cannot overflow the stack, expand entities or hang the parser.
+/// </summary>
+internal static class SafeXml
+{
+    public const int MaxDepth = 32;
+
+    private static XmlReaderSettings Settings() => new()
     {
-        if (node.LocalName == localName) return node;
-        foreach (XmlNode child in node.ChildNodes)
+        DtdProcessing = DtdProcessing.Prohibit,
+        XmlResolver = null,
+        IgnoreComments = true,
+        IgnoreProcessingInstructions = true,
+        MaxCharactersInDocument = 1 << 20,
+    };
+
+    public static Dictionary<string, string>? Extract(byte[] data, IEnumerable<string> texts, IEnumerable<string>? markers = null) =>
+        Extract(() => XmlReader.Create(new MemoryStream(data), Settings()), texts, markers);
+
+    public static Dictionary<string, string>? Extract(string xml, IEnumerable<string> texts, IEnumerable<string>? markers = null) =>
+        Extract(() => XmlReader.Create(new StringReader(xml), Settings()), texts, markers);
+
+    /// <summary>
+    /// Returns the trimmed text of the first element (by local name) in <paramref name="texts"/> that has non-blank
+    /// text, plus an empty entry for every name in <paramref name="markers"/> that occurs. Null if the XML is malformed.
+    /// </summary>
+    private static Dictionary<string, string>? Extract(Func<XmlReader> open, IEnumerable<string> texts, IEnumerable<string>? markers)
+    {
+        var want = new HashSet<string>(texts);
+        var mark = new HashSet<string>(markers ?? Array.Empty<string>());
+        var result = new Dictionary<string, string>();
+        try
         {
-            var hit = FindLocal(child, localName);
-            if (hit != null) return hit;
+            using var r = open();
+            r.Read();
+            while (!r.EOF)
+            {
+                if (r.NodeType == XmlNodeType.Element)
+                {
+                    if (r.Depth > MaxDepth) return null;
+                    if (mark.Contains(r.LocalName)) result.TryAdd(r.LocalName, "");
+                    if (want.Contains(r.LocalName) && !result.ContainsKey(r.LocalName))
+                    {
+                        string name = r.LocalName;
+                        string text = ReadText(r).Trim();
+                        if (text.Length > 0) result[name] = text;
+                        continue; // ReadText left the reader on the next node
+                    }
+                }
+                r.Read();
+            }
+            return result;
         }
-        return null;
+        catch (Exception ex) when (ex is XmlException or ArgumentException or InvalidOperationException or IOException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Text of the element the reader is on (including text inside child elements); moves past its end tag.</summary>
+    private static string ReadText(XmlReader r)
+    {
+        if (r.IsEmptyElement) { r.Read(); return ""; }
+        int depth = r.Depth;
+        var sb = new StringBuilder();
+        r.Read();
+        while (!r.EOF && !(r.NodeType == XmlNodeType.EndElement && r.Depth == depth))
+        {
+            if (r.Depth > MaxDepth) throw new XmlException("XML nested too deeply");
+            if (r.NodeType is XmlNodeType.Text or XmlNodeType.CDATA or XmlNodeType.Whitespace or XmlNodeType.SignificantWhitespace)
+                sb.Append(r.Value);
+            r.Read();
+        }
+        r.Read();
+        return sb.ToString();
     }
 }

@@ -140,6 +140,7 @@ public sealed class TempAddressManager
                 yield return Ipv4.FromUInt(0xA9FE0000u | (uint)rnd.Next(1, 254) << 8 | (uint)rnd.Next(10, 250));
             yield break;
         }
+        if (subnet.Broadcast - subnet.Network < 6) yield break; // too small to leave room for devices
         uint top = subnet.Broadcast - 4; // .251 in a /24
         for (uint a = top; a > subnet.Network && top - a < 40; a--) yield return Ipv4.FromUInt(a);
     }

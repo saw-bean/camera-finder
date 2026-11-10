@@ -17,7 +17,7 @@ public sealed class WindowsArpResolver : IArpResolver
     public bool IsSupported => OperatingSystem.IsWindows();
 
     public Task<string?> ResolveAsync(IPAddress target, IPAddress source, CancellationToken ct) =>
-        Task.Run(() =>
+        RunBlocking(() =>
         {
             ct.ThrowIfCancellationRequested();
             var mac = new byte[6];
@@ -28,6 +28,14 @@ public sealed class WindowsArpResolver : IArpResolver
             int rc = SendARP(dst, src, mac, ref len);
             return rc == 0 && len == 6 ? OuiDatabase.FormatMac(mac) : null;
         }, ct);
+
+    /// <summary>
+    /// Runs a blocking call (SendARP waits up to ~3 s for a missing host) on its own thread. Task.Run would park
+    /// dozens of thread-pool threads, and the pool adds threads slowly, so the sweep would run far below its
+    /// intended concurrency and starve the rest of the app's async work.
+    /// </summary>
+    public static Task<T> RunBlocking<T>(Func<T> call, CancellationToken ct) =>
+        Task.Factory.StartNew(call, ct, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
     [DllImport("iphlpapi.dll", ExactSpelling = true)]
     private static extern int SendARP(uint destIp, uint srcIp, byte[] macAddr, ref uint physAddrLen);

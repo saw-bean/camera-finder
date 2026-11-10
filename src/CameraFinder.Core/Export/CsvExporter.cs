@@ -21,7 +21,7 @@ public static class CsvExporter
                 d.Vendor ?? "",
                 d.Kind.ToString(),
                 d.Description,
-                string.Join(" ", d.OpenPorts),
+                d.OpenPortsText,
                 d.WebUrl ?? "",
                 d.FoundBy,
                 ""));
@@ -33,8 +33,8 @@ public static class CsvExporter
 
     private static string Escape(string s)
     {
-        // Prevent spreadsheet formula injection from device-supplied text (e.g. a web title starting with "=").
-        if (s.Length > 0 && "=+-@".Contains(s[0])) s = "'" + s;
+        // Prevent spreadsheet formula injection from device-supplied text (e.g. a web title starting with "=", or tab/CR then "=").
+        if (s.Length > 0 && "=+-@\t\r".Contains(s[0])) s = "'" + s;
         return s.IndexOfAny(new[] { ',', '"', '\n', '\r' }) >= 0 ? "\"" + s.Replace("\"", "\"\"") + "\"" : s;
     }
 }

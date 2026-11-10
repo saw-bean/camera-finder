@@ -452,6 +452,148 @@ static class Tests
         Assert.True(csv.Contains("80 554"), "ports");
     }
 
+    // ---------- Robustness regressions (found by stress testing) ----------
+    static void Within(int ms, string what, Action a)
+    {
+        var t = Task.Run(a);
+        if (!t.Wait(ms)) throw new Exception($"{what}: took longer than {ms} ms");
+    }
+
+    public static void TestOnvifSurvivesHostileXml()
+    {
+        // Deep nesting used to overflow the stack (kills the process); bad XML declarations threw ArgumentException.
+        string deep = string.Concat(Enumerable.Repeat("<a>", 20000)) + "<ProbeMatch/>" + string.Concat(Enumerable.Repeat("</a>", 20000));
+        Within(2000, "deep XML", () => Assert.Equal(null, OnvifProbe.Parse(IPAddress.Loopback, Encoding.UTF8.GetBytes(deep)), "deep XML rejected"));
+        Assert.Equal(null, OnvifProbe.Parse(IPAddress.Loopback, Encoding.UTF8.GetBytes("<?xml version=\"9\"?><ProbeMatch/>")), "bad version");
+        Assert.Equal(null, OnvifProbe.Parse(IPAddress.Loopback, Array.Empty<byte>()), "empty");
+        var rnd = new Random(7);
+        var seed = Encoding.UTF8.GetBytes(OnvifReply.Trim());
+        for (int i = 0; i < 3000; i++)
+        {
+            var b = (byte[])seed.Clone();
+            for (int k = rnd.Next(1, 6); k > 0; k--) b[rnd.Next(b.Length)] = (byte)rnd.Next(256);
+            OnvifProbe.Parse(IPAddress.Loopback, b); // must not throw
+        }
+    }
+
+    public static void TestOnvifAdjacentElementsAndEmptyOnes()
+    {
+        // XAddrs directly followed by Scopes (no whitespace) and an empty element first: the streaming reader must not skip any.
+        string xml = "<Envelope><Body><ProbeMatches><ProbeMatch><Types/><XAddrs>http://10.1.2.3/onvif</XAddrs><Scopes>onvif://www.onvif.org/hardware/M3106</Scopes></ProbeMatch></ProbeMatches></Body></Envelope>";
+        var hit = OnvifProbe.Parse(IPAddress.Loopback, Encoding.UTF8.GetBytes(xml))!;
+        Assert.Equal("10.1.2.3", hit.Ip.ToString());
+        Assert.Equal("M3106", hit.Model);
+        Assert.Equal(null, OnvifProbe.Parse(IPAddress.Loopback, Encoding.UTF8.GetBytes("<Probe><XAddrs>http://10.1.2.3/</XAddrs></Probe>")), "no ProbeMatch");
+    }
+
+    public static void TestSsdpDescriptionHostileAndNested()
+    {
+        var (name, _, model) = SsdpProbe.ParseDescription("<root><device><friendlyName>  </friendlyName><friendlyName>Gate <b>2</b></friendlyName><modelName>NVR</modelName></device></root>");
+        Assert.Equal("Gate 2", name, "first non-blank, child text included");
+        Assert.Equal("NVR", model);
+        string deep = "<root>" + string.Concat(Enumerable.Repeat("<x>", 20000)) + "</root>";
+        Within(2000, "deep description", () => Assert.Equal(null, SsdpProbe.ParseDescription(deep).Name));
+    }
+
+    public static void TestExtractTitleIsFastOnHostilePages()
+    {
+        // The old regex backtracked for minutes on these 64 KB inputs.
+        Within(1000, "whitespace", () => Assert.Equal(null, DeviceEnricher.ExtractTitle("<title>" + new string(' ', 64 * 1024))));
+        Within(1000, "repeated", () => Assert.Equal(null, DeviceEnricher.ExtractTitle(string.Concat(Enumerable.Repeat("<title> a ", 6500)))));
+        Assert.Equal("Cam", DeviceEnricher.ExtractTitle("<titlebar>x</titlebar><title lang=\"en\">Cam</title>"), "skips <titlebar>");
+        Assert.Equal(new string('x', 80), DeviceEnricher.ExtractTitle("<title>" + new string('x', 500) + "</title>"), "capped at 80");
+    }
+
+    public static void TestCsvBlocksTabAndCrFormulas()
+    {
+        var d = new Device(IPAddress.Parse("10.0.0.1")) { Vendor = "\t=cmd|' /C calc'!A0", WebTitle = "\r=1+1" };
+        string csv = CsvExporter.ToCsv(new[] { d });
+        Assert.True(!csv.Contains(",\t="), "tab formula neutralised: " + csv);
+        Assert.True(csv.Contains("\"'\r=1+1\""), "CR formula neutralised: " + csv);
+    }
+
+    public static void TestSubnetParseRejectsBadInput()
+    {
+        foreach (var bad in new[] { "10.0.0.0/33", "10.0.0.0/-1", "10.0.0.0/x", "::1/64", "10.0.0.0/24/1" })
+        {
+            bool threw = false;
+            try { Subnet.Parse(bad); } catch (FormatException) { threw = true; }
+            Assert.True(threw, "rejected " + bad);
+        }
+        Assert.Equal("0.0.0.0/0", Subnet.Parse("10.0.0.0/0").ToString());
+        Assert.Equal(1, Subnet.Parse("10.0.0.5/32").Hosts().Count());
+        Assert.Equal(2, Subnet.Parse("255.255.255.254/31").Hosts().Count(), "no wrap at top of address space");
+    }
+
+    public static void TestTempCandidatesStayInsideSubnet()
+    {
+        foreach (var s in new[] { "10.0.0.0/30", "10.0.0.0/29", "0.0.0.0/30", "255.255.255.0/24", "192.0.0.0/24" })
+        {
+            var sub = Subnet.Parse(s);
+            var c = TempAddressManager.Candidates(sub).ToList();
+            Assert.True(c.All(a => sub.Contains(a) && !Ipv4.ToUInt(a).Equals(sub.Network) && Ipv4.ToUInt(a) != sub.Broadcast), $"{s}: {string.Join(",", c)}");
+        }
+    }
+
+    public static void TestHikvisionDefaultRangeIsJoinable()
+    {
+        Assert.True(Ipv4.IsJoinable(IPAddress.Parse("192.0.0.64")), "Hikvision default 192.0.0.64");
+        Assert.True(Ipv4.IsJoinable(IPAddress.Parse("10.1.1.1")), "private");
+        Assert.True(!Ipv4.IsJoinable(IPAddress.Parse("192.0.2.1")) && !Ipv4.IsJoinable(IPAddress.Parse("8.8.8.8")), "public / doc ranges");
+    }
+
+    public static async Task TestDeviceReadsAreThreadSafe()
+    {
+        // The UI reads FoundBy/OpenPorts while the engine adds to them; this used to throw "Collection was modified".
+        var d = new Device(IPAddress.Parse("10.0.0.9"));
+        using var cts = new CancellationTokenSource(700);
+        var writer = Task.Run(() => { int i = 0; while (!cts.IsCancellationRequested) lock (d) { d.Protocols.Add("P" + (i++ % 300)); d.OpenPorts.Add(i % 9000); if (i % 500 == 0) { d.Protocols.Clear(); d.OpenPorts.Clear(); } } });
+        var reader = Task.Run(() => { while (!cts.IsCancellationRequested) { _ = d.FoundBy; _ = d.OpenPortsText; _ = d.Kind; } });
+        await Task.WhenAll(writer, reader);
+    }
+
+    public static async Task TestBlockingArpCallsRunAtFullConcurrency()
+    {
+        // SendARP blocks; running it with Task.Run starved the thread pool (12 of 48 concurrent in testing).
+        int inFlight = 0, peak = 0;
+        var r = new BlockingArp(() => { int n = Interlocked.Increment(ref inFlight); lock (typeof(Tests)) peak = Math.Max(peak, n); Thread.Sleep(400); Interlocked.Decrement(ref inFlight); });
+        await ArpSweeper.SweepAsync(r, Subnet.Parse("10.0.0.0/26"), IPAddress.Parse("10.0.0.1"), Array.Empty<IPAddress>(), 48, null, CancellationToken.None);
+        Assert.True(peak >= 40, $"peak concurrency {peak} of 48");
+    }
+
+    sealed class BlockingArp(Action block) : IArpResolver
+    {
+        public bool IsSupported => true;
+        public Task<string?> ResolveAsync(IPAddress target, IPAddress source, CancellationToken ct) =>
+            WindowsArpResolver.RunBlocking<string?>(() => { block(); return null; }, ct);
+    }
+
+    public static async Task TestProbeListenerSurvivesThrowingHandler()
+    {
+        // A reply that makes the handler throw must not stop the listener (it used to end the whole ONVIF/SSDP probe).
+        using var echo = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        var ep = (IPEndPoint)echo.Client.LocalEndPoint!;
+        var server = Task.Run(async () => { var r = await echo.ReceiveAsync(); for (int i = 0; i < 3; i++) await echo.SendAsync(new byte[] { 1 }, 1, r.RemoteEndPoint); });
+        int calls = 0;
+        await MulticastProbe.RunAsync(IPAddress.Loopback, ep, new[] { new byte[] { 0 } }, TimeSpan.FromSeconds(1),
+            (_, _) => { if (Interlocked.Increment(ref calls) == 1) throw new FormatException("bad reply"); }, CancellationToken.None);
+        await server;
+        Assert.Equal(3, calls, "replies handled after a bad one");
+    }
+
+    public static void TestMdnsRejectsOverlongNames()
+    {
+        var mdns = Proto("mDNS (Axis/Arecont)");
+        // Reserved label type 0x40-0xBF and a 300-byte name must be refused, not fed to the instance-name regex.
+        var d = new List<byte> { 0, 0, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0x7F };
+        d.AddRange(new byte[200]);
+        Assert.Equal(null, mdns.Parse(From, d.ToArray()), "reserved label length");
+        var e = new List<byte> { 0, 0, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0 };
+        for (int i = 0; i < 6; i++) { e.Add(60); e.AddRange(Enumerable.Repeat((byte)'a', 60)); }
+        e.Add(0); e.AddRange(new byte[10]);
+        Assert.Equal(null, mdns.Parse(From, e.ToArray()), "name over 255 bytes");
+    }
+
     // ---------- Live tests (real sockets / capture) ----------
     static IPAddress LocalIPv4()
     {
@@ -514,7 +656,11 @@ static class Tests
         await Task.Delay(800);
         using (var u = new UdpClient(new IPEndPoint(local, 0)) { EnableBroadcast = true })
             for (int i = 0; i < 3; i++) await u.SendAsync(new byte[] { 1, 2, 3 }, 3, new IPEndPoint(IPAddress.Broadcast, 9));
-        await listen;
+        try { await listen; }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("permission", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new SkipException("no capture permission (run as root/admin): " + ex.Message);
+        }
         Assert.True(seen.Any(o => o.Ip.Equals(local) && o.Mac != null), $"own broadcast captured ({seen.Count} observations)");
     }
 

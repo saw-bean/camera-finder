@@ -110,7 +110,7 @@ public sealed class ScanEngine
             .Where(s => !Ipv4.IsLinkLocal(s.Address) || adapter.Addresses.Count == 1).ToList();
         var seenIps = _devices.Keys.Concat(_mentioned.Keys).ToList();
         var newRanges = seenIps
-            .Where(ip => !Ipv4.IsLinkLocal(ip) && Ipv4.IsPrivate(ip) && !adapter.Addresses.Any(a => Subnet.Of(a.Address, a.Prefix).Contains(ip)))
+            .Where(ip => !Ipv4.IsLinkLocal(ip) && Ipv4.IsJoinable(ip) && !adapter.Addresses.Any(a => Subnet.Of(a.Address, a.Prefix).Contains(ip)))
             .Select(ip => Subnet.Of(ip, 24))
             .Distinct()
             .OrderByDescending(s => seenIps.Count(ip => s.Contains(ip)))

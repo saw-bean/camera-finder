@@ -1,6 +1,5 @@
 using System.Net;
 using System.Text;
-using System.Xml;
 
 namespace CameraFinder.Core.Discovery;
 
@@ -43,22 +42,9 @@ public static class SsdpProbe
     /// <summary>Reads friendlyName, manufacturer and modelName from a UPnP device description XML.</summary>
     public static (string? Name, string? Manufacturer, string? Model) ParseDescription(string xml)
     {
-        var doc = new XmlDocument { XmlResolver = null };
-        try
-        {
-            using var reader = XmlReader.Create(new StringReader(xml),
-                new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null });
-            doc.Load(reader);
-        }
-        catch (XmlException) { return (null, null, null); }
-
-        string? Get(string local)
-        {
-            var nodes = doc.GetElementsByTagName("*");
-            foreach (XmlNode n in nodes)
-                if (n.LocalName == local && !string.IsNullOrWhiteSpace(n.InnerText)) return n.InnerText.Trim();
-            return null;
-        }
+        var found = SafeXml.Extract(xml, new[] { "friendlyName", "manufacturer", "modelName", "modelNumber" });
+        if (found == null) return (null, null, null);
+        string? Get(string local) => found.TryGetValue(local, out var v) ? v : null;
 
         string? model = Get("modelName");
         string? number = Get("modelNumber");

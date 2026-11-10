@@ -48,7 +48,7 @@ public static class MulticastProbe
             try { r = await udp.ReceiveAsync(timeout.Token); }
             catch (OperationCanceledException) { break; }
             catch (SocketException) { continue; }
-            onReply(r.RemoteEndPoint, r.Buffer);
+            Deliver(onReply, r);
         }
     }
 
@@ -82,7 +82,14 @@ public static class MulticastProbe
             try { r = await udp.ReceiveAsync(timeout.Token); }
             catch (OperationCanceledException) { break; }
             catch (SocketException) { continue; } // e.g. ICMP port unreachable on Windows
-            onReply(r.RemoteEndPoint, r.Buffer);
+            Deliver(onReply, r);
         }
+    }
+
+    /// <summary>One malformed or unexpected reply must not stop us hearing the rest.</summary>
+    private static void Deliver(Action<IPEndPoint, byte[]> onReply, UdpReceiveResult r)
+    {
+        try { onReply(r.RemoteEndPoint, r.Buffer); }
+        catch (Exception) { /* bad reply: ignore it and keep listening */ }
     }
 }
