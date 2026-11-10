@@ -29,6 +29,9 @@ public sealed class ScanOptions
     /// </summary>
     public bool VendorProtocols { get; init; } = true;
 
+    /// <summary>Send ONVIF, SSDP and manufacturer discovery probes. Off in demo mode (nothing is sent).</summary>
+    public bool SendProbes { get; init; } = true;
+
     /// <summary>Check ports and read web pages of found devices (step 4). Only turned off in tests.</summary>
     public bool ReadDetails { get; init; } = true;
 
@@ -49,6 +52,7 @@ public sealed class ScanEngine
     private readonly IAddressJoiner? _temp;
     private readonly OuiDatabase _oui;
     private readonly IPassiveCapture _capture;
+    private readonly Func<Device, string?, CancellationToken, Task>? _readDetails;
     private readonly ConcurrentDictionary<IPAddress, Device> _devices = new();
     private readonly ConcurrentDictionary<IPAddress, string> _ssdpDescriptions = new();
     private readonly ConcurrentDictionary<IPAddress, byte> _mentioned = new(); // IPs seen without a MAC (range hints)
@@ -59,8 +63,11 @@ public sealed class ScanEngine
     public event Action<Device>? DeviceChanged;
     public event Action<string, int>? Progress; // phase text, percent 0-100
 
-    public ScanEngine(IArpResolver arp, IAddressJoiner? temp, OuiDatabase? oui = null, IPassiveCapture? capture = null)
+    /// <param name="readDetails">Step 4 for one device (device, UPnP description URL). Default: <see cref="DeviceEnricher"/>.</param>
+    public ScanEngine(IArpResolver arp, IAddressJoiner? temp, OuiDatabase? oui = null, IPassiveCapture? capture = null,
+        Func<Device, string?, CancellationToken, Task>? readDetails = null)
     {
+        _readDetails = readDetails;
         _arp = arp;
         _temp = temp;
         _oui = oui ?? OuiDatabase.Default;
@@ -193,7 +200,7 @@ public sealed class ScanEngine
                 try
                 {
                     _ssdpDescriptions.TryGetValue(d.Ip, out var desc);
-                    await enricher.EnrichAsync(d, desc, ct);
+                    await (_readDetails?.Invoke(d, desc, ct) ?? enricher.EnrichAsync(d, desc, ct));
                     DeviceChanged?.Invoke(d);
                 }
                 finally
@@ -211,6 +218,7 @@ public sealed class ScanEngine
 
     private async Task ProbeAllAsync(IEnumerable<IPAddress> sources, ScanOptions options, CancellationToken ct)
     {
+        if (!options.SendProbes) return;
         var tasks = new List<Task>();
         foreach (var src in sources)
         {

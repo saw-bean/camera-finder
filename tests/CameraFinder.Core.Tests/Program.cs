@@ -736,6 +736,109 @@ static class Tests
         Assert.True(engine.Devices.Any(d => d.Ip.ToString() == "10.0.5.21"), "heard device still listed");
     }
 
+    // ---------- Demo site (virtual scanning) and "Open web page" through a temporary IP ----------
+
+    static DemoSite FastDemo() => new() { ArpDelay = TimeSpan.Zero, JoinDelay = TimeSpan.Zero };
+
+    static async Task<(ScanEngine Engine, List<string> Log)> RunDemo(DemoSite site, bool safe)
+    {
+        var engine = new ScanEngine(site, site, capture: site, readDetails: site.ReadDetailsAsync);
+        var log = new List<string>();
+        engine.Log += m => { lock (log) log.Add(m); };
+        await engine.RunAsync(site.Laptop, DemoSite.Options(TimeSpan.FromMilliseconds(100), safe), CancellationToken.None);
+        return (engine, log);
+    }
+
+    public static async Task TestDemoScanFindsWholeSite()
+    {
+        var site = FastDemo();
+        var (engine, log) = await RunDemo(site, safe: false);
+        string Dump() => string.Join("\n", engine.Devices.OrderBy(d => Ipv4.ToUInt(d.Ip)).Select(d => $"  {d.Ip} {d.Vendor} | {d.Description} [{d.FoundBy}]")) + "\n" + string.Join("\n", log);
+        Assert.Equal(DemoSite.Devices.Count, engine.Devices.Count, "every demo device found:\n" + Dump());
+        foreach (var dd in DemoSite.Devices)
+        {
+            var d = engine.Devices.First(x => x.Ip.ToString() == dd.Ip);
+            Assert.Equal(dd.Mac, d.Mac, dd.Ip + " MAC");
+            Assert.True(d.Vendor != null, $"{dd.Ip} has a manufacturer from its MAC:\n" + Dump());
+            Assert.Equal(dd.Camera ? DeviceKind.Camera : dd.Ports.Length > 0 ? DeviceKind.WebDevice : DeviceKind.Other, d.Kind, dd.Ip + " type");
+        }
+        Assert.True(engine.Devices.First(x => x.Ip.ToString() == "10.0.5.40").Sources.HasFlag(DiscoverySource.ArpSweep), "quiet camera found by sweep");
+        Assert.Equal(4, site.Joined.Count, "joined 10.0.5/24, 172.16.8/24, 192.0.0/24 and 169.254/16");
+        Assert.True(!engine.Devices.Any(d => site.Joined.Any(j => j.Address.Equals(d.Ip))), "temporary IPs not listed as devices");
+        Assert.True(log.Any(l => l.Contains("Other ranges seen")), "range discovery logged");
+        Assert.True(log.Any(l => l.Contains($"{DemoSite.Devices.Count(x => x.Camera)} camera(s)")), "camera count in final log:\n" + Dump());
+    }
+
+    public static async Task TestDemoSafeModeChangesNothing()
+    {
+        var site = FastDemo();
+        var (engine, _) = await RunDemo(site, safe: true);
+        Assert.Equal(0, site.Joined.Count, "no temporary IPs in safe mode");
+        Assert.Equal(DemoSite.Devices.Count(d => d.Heard), engine.Devices.Count, "only devices that transmit are listed");
+        var other = engine.Devices.First(d => d.Ip.ToString() == "10.0.5.21");
+        Assert.Equal(null, other.WebUrl, "other-range device has no web page yet (not reachable)");
+        var own = engine.Devices.First(d => d.Ip.ToString() == "192.168.1.64");
+        Assert.Equal("http://192.168.1.64/", own.WebUrl, "own-range device reachable");
+    }
+
+    public static async Task TestOpenWebPageAddsVirtualIpInDeviceRange()
+    {
+        var site = FastDemo();
+        var (engine, _) = await RunDemo(site, safe: true); // safe scan: nothing joined yet
+        var web = new WebPageAccess(site, () => site.Laptop, site.ReadDetailsAsync);
+        var avoid = engine.Devices.Select(d => d.Ip).ToHashSet();
+        var axis = engine.Devices.First(d => d.Ip.ToString() == "10.0.5.21");
+
+        // Safe mode: asks first, changes nothing.
+        var ask = await web.PrepareAsync(axis, mayJoin: false, avoid, CancellationToken.None);
+        Assert.Equal(WebPageStatus.NeedsTemporaryAddress, ask.Status);
+        Assert.Equal("10.0.5.0/24", ask.Range.ToString());
+        Assert.Equal(0, site.Joined.Count, "nothing added before the user agrees");
+
+        // User agrees: virtual IP added in the camera's range, ports re-checked, page ready.
+        var ok = await web.PrepareAsync(axis, mayJoin: true, avoid, CancellationToken.None);
+        Assert.Equal(WebPageStatus.Ready, ok.Status);
+        Assert.Equal("http://10.0.5.21/", ok.Url);
+        Assert.Equal("10.0.5.251", ok.TemporaryAddress?.ToString(), "temporary IP at the top of the camera's range");
+        Assert.True(Reach.CanReach(site.Laptop.Addresses, axis.Ip), "laptop now in the camera's range");
+        Assert.Equal(DeviceKind.Camera, axis.Kind, "details read after joining");
+
+        // Second camera in the same range: no second IP.
+        var ipro = new Device(IPAddress.Parse("10.0.5.40"));
+        var again = await web.PrepareAsync(ipro, mayJoin: true, avoid, CancellationToken.None);
+        Assert.Equal(WebPageStatus.Ready, again.Status);
+        Assert.Equal(null, again.TemporaryAddress, "range already joined");
+        Assert.Equal(1, site.Joined.Count);
+
+        // Hikvision on its factory address and a self-assigned camera: both joinable.
+        Assert.Equal(WebPageStatus.Ready, (await web.PrepareAsync(engine.Devices.First(d => d.Ip.ToString() == "192.0.0.64"), true, avoid, CancellationToken.None)).Status);
+        var ll = await web.PrepareAsync(engine.Devices.First(d => d.Ip.ToString() == "169.254.12.34"), true, avoid, CancellationToken.None);
+        Assert.Equal(WebPageStatus.Ready, ll.Status);
+        Assert.Equal("169.254.0.0/16", ll.Range.ToString(), "link-local joins the whole /16");
+
+        // Door controller: reachable but no web page.
+        var door = engine.Devices.First(d => d.Ip.ToString() == "10.0.5.60");
+        Assert.Equal(WebPageStatus.NoWebPage, (await web.PrepareAsync(door, true, avoid, CancellationToken.None)).Status);
+
+        // Public address: never joined.
+        Assert.Equal(WebPageStatus.NotJoinable, (await web.PrepareAsync(new Device(IPAddress.Parse("8.8.8.8")), true, avoid, CancellationToken.None)).Status);
+        Assert.Equal(3, site.Joined.Count, "10.0.5/24, 192.0.0/24, 169.254/16");
+    }
+
+    public static async Task TestOpenWebPageReportsJoinFailure()
+    {
+        var web = new WebPageAccess(new NoJoin(), () => SimLaptop(), (_, _) => Task.CompletedTask);
+        var r = await web.PrepareAsync(new Device(IPAddress.Parse("10.9.9.9")), true, new HashSet<IPAddress>(), CancellationToken.None);
+        Assert.Equal(WebPageStatus.JoinFailed, r.Status);
+        var noJoiner = new WebPageAccess(null, () => SimLaptop(), (_, _) => Task.CompletedTask);
+        Assert.Equal(WebPageStatus.JoinFailed, (await noJoiner.PrepareAsync(new Device(IPAddress.Parse("10.9.9.9")), true, new HashSet<IPAddress>(), CancellationToken.None)).Status);
+    }
+
+    sealed class NoJoin : IAddressJoiner
+    {
+        public Task<IPAddress?> AddFreeAddressAsync(Adapter adapter, Subnet subnet, ISet<IPAddress> avoid, CancellationToken ct) => Task.FromResult<IPAddress?>(null);
+    }
+
     // ---------- Live tests (real sockets / capture) ----------
     static IPAddress LocalIPv4()
     {

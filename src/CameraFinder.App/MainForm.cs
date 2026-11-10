@@ -14,6 +14,7 @@ public sealed class MainForm : Form
     private readonly ComboBox _adapters = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 340 };
     private readonly Button _refresh = new() { Text = "↻", Width = 32 };
     private readonly CheckBox _safeMode = new() { Text = "Safe mode (listen only, no network changes)", AutoSize = true };
+    private readonly CheckBox _demo = new() { Text = "Demo (test site)", AutoSize = true };
     private readonly NumericUpDown _listen = new() { Minimum = 5, Maximum = 300, Value = 30, Width = 55 };
     private readonly Button _scan = new() { Text = "Scan", Width = 90, Height = 30, Font = new Font(SystemFonts.DefaultFont, FontStyle.Bold) };
     private readonly Button _stop = new() { Text = "Stop", Width = 70, Height = 30, Enabled = false };
@@ -41,6 +42,11 @@ public sealed class MainForm : Form
     private ScanEngine? _engine;
     private CancellationTokenSource? _cts;
     private int _sortColumn;
+
+    // Set per scan: how "Open web page" reaches a device (real network, or the demo site).
+    private WebPageAccess? _web;
+    private DemoSite? _demoSite;
+    private bool _opening;
 
     public MainForm()
     {
@@ -78,6 +84,9 @@ public sealed class MainForm : Form
         top.Controls.Add(_listen);
         _safeMode.Margin = new Padding(12, 5, 6, 0);
         top.Controls.Add(_safeMode);
+        _demo.Margin = new Padding(6, 5, 6, 0);
+        top.Controls.Add(_demo);
+        new ToolTip().SetToolTip(_demo, "Scans a simulated site with cameras in several IP ranges. Sends nothing and changes nothing - for testing and training.");
         top.Controls.Add(_scan);
         top.Controls.Add(_stop);
 
@@ -112,9 +121,9 @@ public sealed class MainForm : Form
         _scan.Click += async (_, _) => await ScanAsync();
         _stop.Click += (_, _) => _cts?.Cancel();
         _list.SelectedIndexChanged += (_, _) => UpdateButtons();
-        _list.DoubleClick += (_, _) => OpenSelected();
+        _list.DoubleClick += async (_, _) => await OpenSelectedAsync();
         _list.ColumnClick += (_, e) => Sort(e.Column);
-        _open.Click += (_, _) => OpenSelected();
+        _open.Click += async (_, _) => await OpenSelectedAsync();
         _copy.Click += (_, _) =>
         {
             if (Selected() is not { } d) return;
@@ -201,17 +210,38 @@ public sealed class MainForm : Form
 
     private async Task ScanAsync()
     {
-        if (_adapters.SelectedItem is not Adapter adapter) { AppendLog("Pick an adapter first."); return; }
-
-        // Refresh the adapter: its addresses may have changed since the list was loaded.
-        adapter = Adapter.List().FirstOrDefault(a => a.Id == adapter.Id) ?? adapter;
+        bool demo = _demo.Checked;
+        Adapter adapter;
+        ScanOptions options;
+        if (demo)
+        {
+            _demoSite = new DemoSite();
+            adapter = _demoSite.Laptop;
+            options = DemoSite.Options(TimeSpan.FromSeconds(Math.Min(8, (double)_listen.Value)), _safeMode.Checked);
+            _engine = new ScanEngine(_demoSite, _demoSite, capture: _demoSite, readDetails: _demoSite.ReadDetailsAsync);
+            var site = _demoSite;
+            _web = new WebPageAccess(site, () => site.Laptop, site.ReadDetailsAsync);
+            AppendLog("DEMO: scanning a simulated site. Nothing is sent and the laptop's settings are not changed.");
+        }
+        else
+        {
+            if (_adapters.SelectedItem is not Adapter picked) { AppendLog("Pick an adapter first."); return; }
+            // Refresh the adapter: its addresses may have changed since the list was loaded.
+            adapter = Adapter.List().FirstOrDefault(a => a.Id == picked.Id) ?? picked;
+            options = new ScanOptions { SafeMode = _safeMode.Checked, ListenTime = TimeSpan.FromSeconds((double)_listen.Value) };
+            _demoSite = null;
+            _engine = new ScanEngine(new WindowsArpResolver(), _temp);
+            string adapterId = adapter.Id;
+            _web = new WebPageAccess(OperatingSystem.IsWindows() ? _temp : null,
+                () => Adapter.List().FirstOrDefault(a => a.Id == adapterId),
+                async (d, ct) => { using var enricher = new DeviceEnricher(); await enricher.EnrichAsync(d, null, ct); });
+        }
 
         _list.Items.Clear();
         _rows.Clear();
         SetScanning(true);
         _cts = new CancellationTokenSource();
 
-        _engine = new ScanEngine(new WindowsArpResolver(), _temp);
         _engine.Log += AppendLog;
         var engine = _engine;
         _engine.DeviceChanged += d => Post(() => { if (_engine == engine) UpsertRow(d); });
@@ -219,11 +249,7 @@ public sealed class MainForm : Form
 
         try
         {
-            await _engine.RunAsync(adapter, new ScanOptions
-            {
-                SafeMode = _safeMode.Checked,
-                ListenTime = TimeSpan.FromSeconds((double)_listen.Value),
-            }, _cts.Token);
+            await _engine.RunAsync(adapter, options, _cts.Token);
             foreach (var d in _engine.Devices) UpsertRow(d);
             _status.Text = $"Done - {_engine.Devices.Count} device(s)";
         }
@@ -240,8 +266,9 @@ public sealed class MainForm : Form
         finally
         {
             SetScanning(false);
-            if (_temp.Added.Count > 0)
+            if (!demo && _temp.Added.Count > 0)
                 AppendLog($"{_temp.Added.Count} temporary IP(s) stay on the adapter so you can open web pages. They are removed when you close the app.");
+            AppendLog("Tip: Open web page also works for devices in other ranges - the app adds a temporary IP in that range first.");
         }
     }
 
@@ -270,20 +297,73 @@ public sealed class MainForm : Form
     private void UpdateButtons()
     {
         var d = Selected();
-        _open.Enabled = d?.WebUrl != null;
+        _open.Enabled = d != null && !_opening;
         _copy.Enabled = d != null;
     }
 
-    private void OpenSelected()
+    /// <summary>
+    /// Opens the selected device's web page. If the laptop is not in the device's range, adds a temporary (virtual) IP
+    /// in that range first - automatically, or after asking when safe mode is on - then re-checks the device's ports.
+    /// </summary>
+    private async Task OpenSelectedAsync()
     {
         var d = Selected();
-        if (d == null) return;
-        if (d.WebUrl == null)
+        if (d == null || _opening) return;
+        if (_web == null || _engine == null) { AppendLog("Run a scan first."); return; }
+        if (_stop.Enabled) { AppendLog("Wait for the scan to finish (or press Stop), then open the web page."); return; }
+
+        _opening = true;
+        UpdateButtons();
+        _status.Text = $"Checking {d.Ip}…";
+        try
         {
-            AppendLog($"{d.Ip} has no web page on ports 80/443/8080. Use the manufacturer's tool for this device.");
-            return;
+            var avoid = _engine.Devices.Select(x => x.Ip).ToHashSet();
+            var result = await _web.PrepareAsync(d, mayJoin: !_safeMode.Checked, avoid, CancellationToken.None);
+            if (result.Status == WebPageStatus.NeedsTemporaryAddress)
+            {
+                var answer = MessageBox.Show(this,
+                    $"{d.Ip} is in {result.Range}, a range this laptop is not in.\n\n" +
+                    "Add a temporary IP address in that range so its web page can be opened?\n\n" +
+                    "Safe mode is on: this changes the laptop's network settings until you press \"Remove temporary IPs\" or close the app.",
+                    "Open web page", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (answer != DialogResult.Yes) { AppendLog($"{d.Ip}: not opened (no temporary IP added)."); return; }
+                result = await _web.PrepareAsync(d, mayJoin: true, avoid, CancellationToken.None);
+            }
+
+            if (result.TemporaryAddress != null)
+                AppendLog($"Added temporary IP {result.TemporaryAddress} in {result.Range} to reach {d.Ip}{(_demoSite != null ? " (demo)" : "")}.");
+            UpsertRow(d);
+
+            switch (result.Status)
+            {
+                case WebPageStatus.Ready when _demoSite != null:
+                    AppendLog($"DEMO: would open {result.Url} ({d.Description}). Demo devices have no real web page.");
+                    break;
+                case WebPageStatus.Ready:
+                    AppendLog($"Opening {result.Url}");
+                    OpenUrl(result.Url!);
+                    break;
+                case WebPageStatus.NoWebPage:
+                    AppendLog($"{d.Ip} has no web page on ports 80/443/8080. Use the manufacturer's tool for this device.");
+                    break;
+                case WebPageStatus.JoinFailed:
+                    AppendLog($"Could not add a temporary IP in {result.Range} to reach {d.Ip}. Run Camera Finder as administrator, or set an IP in that range on the laptop by hand.");
+                    break;
+                case WebPageStatus.NotJoinable:
+                    AppendLog($"{d.Ip} is in a public IP range; the app only adds temporary IPs in private ranges. Set an address on the laptop by hand.");
+                    break;
+            }
         }
-        OpenUrl(d.WebUrl);
+        catch (Exception ex)
+        {
+            AppendLog($"Could not open {d.Ip}: {ex.Message}");
+        }
+        finally
+        {
+            _opening = false;
+            _status.Text = "Ready";
+            UpdateButtons();
+        }
     }
 
     /// <summary>
@@ -327,6 +407,11 @@ public sealed class MainForm : Form
     private void RemoveTemporaryAddresses()
     {
         if (_stop.Enabled) { AppendLog("Stop the scan first."); return; }
+        if (_demoSite != null && _demoSite.Joined.Count > 0)
+        {
+            AppendLog($"DEMO: forgot {_demoSite.Joined.Count} simulated temporary IP(s).");
+            _demoSite.ForgetJoined();
+        }
         int n = _temp.Added.Count;
         _temp.RemoveAll();
         AppendLog(n == 0 ? "No temporary IPs to remove." : $"Removed {n} temporary IP(s). The adapter is back to normal.");
@@ -346,6 +431,7 @@ public sealed class MainForm : Form
         _adapters.Enabled = !scanning;
         _refresh.Enabled = !scanning;
         _safeMode.Enabled = !scanning;
+        _demo.Enabled = !scanning;
         _listen.Enabled = !scanning;
         _removeIps.Enabled = !scanning;
         if (!scanning) _progress.Value = 0;
