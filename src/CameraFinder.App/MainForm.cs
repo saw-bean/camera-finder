@@ -49,6 +49,8 @@ public sealed class MainForm : Form
         Height = 720;
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9F);
+        using (var ico = typeof(MainForm).Assembly.GetManifestResourceStream("CameraFinder.App.app.ico"))
+            if (ico != null) Icon = new Icon(ico);
 
         _temp = new TempAddressManager(AppendLog);
         BuildLayout();

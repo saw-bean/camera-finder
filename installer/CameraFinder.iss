@@ -33,6 +33,7 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\CameraFinder.exe
+SetupIconFile=..\src\CameraFinder.App\app.ico
 LicenseFile=..\LICENSE
 
 [Tasks]
