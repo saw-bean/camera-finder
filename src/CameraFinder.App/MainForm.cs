@@ -11,14 +11,15 @@ namespace CameraFinder.App;
 /// <summary>Main window: pick adapter, Scan, see the device list, open a device's web page.</summary>
 public sealed class MainForm : Form
 {
-    private readonly ComboBox _adapters = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 260 };
-    private readonly Button _refresh = new() { Text = "↻", Width = 32 };
-    private readonly CheckBox _safeMode = new() { Text = "Safe mode (listen only, no network changes)", AutoSize = true };
-    private readonly TextBox _find = new() { Width = 170, PlaceholderText = "Stop when found: IP or MAC" };
-    private readonly CheckBox _demo = new() { Text = "Demo (test site)", AutoSize = true };
-    private readonly NumericUpDown _listen = new() { Minimum = 5, Maximum = 300, Value = 30, Width = 55 };
-    private readonly Button _scan = new() { Text = "Scan", Width = 90, Height = 30, Font = new Font(SystemFonts.DefaultFont, FontStyle.Bold) };
-    private readonly Button _stop = new() { Text = "Stop", Width = 70, Height = 30, Enabled = false };
+    // Buttons size themselves to their text (AutoSize) so nothing is cut off at 125% / 150% Windows scaling.
+    private readonly ComboBox _adapters = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill, Margin = new Padding(3, 4, 3, 3) };
+    private readonly Button _refresh = Btn("↻", minWidth: 32);
+    private readonly CheckBox _safeMode = new() { Text = "Safe mode", AutoSize = true, Margin = new Padding(14, 6, 3, 0) };
+    private readonly TextBox _find = new() { Width = 190, PlaceholderText = "IP or MAC", Margin = new Padding(3, 4, 3, 3) };
+    private readonly CheckBox _demo = new() { Text = "Demo (test site)", AutoSize = true, Margin = new Padding(10, 6, 3, 0) };
+    private readonly NumericUpDown _listen = new() { Minimum = 5, Maximum = 300, Value = 30, Width = 55, Margin = new Padding(3, 4, 3, 3) };
+    private readonly Button _scan = Btn("Scan", minWidth: 90, bold: true);
+    private readonly Button _stop = Btn("Stop", minWidth: 70, enabled: false);
 
     private readonly ListView _list = new()
     {
@@ -27,15 +28,15 @@ public sealed class MainForm : Form
     };
 
     private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, BackColor = SystemColors.Window };
-    private readonly Button _open = new() { Text = "Open web page", Width = 120, Enabled = false };
-    private readonly Button _copy = new() { Text = "Copy IP", Width = 80, Enabled = false };
-    private readonly Button _ping = new() { Text = "Ping", Width = 70, Enabled = false };
-    private readonly Button _export = new() { Text = "Export CSV…", Width = 100 };
-    private readonly Button _removeIps = new() { Text = "Remove temporary IPs", Width = 160 };
-    private readonly LinkLabel _npcap = new() { AutoSize = true };
+    private readonly Button _open = Btn("Open web page", enabled: false);
+    private readonly Button _ping = Btn("Ping", enabled: false);
+    private readonly Button _copy = Btn("Copy IP", enabled: false);
+    private readonly Button _export = Btn("Export CSV…");
+    private readonly Button _removeIps = Btn("Remove temporary IPs");
+    private readonly ToolStripStatusLabel _npcap = new() { Margin = new Padding(12, 3, 0, 2) };
 
     private readonly ToolStripStatusLabel _status = new() { Text = "Ready", Spring = true, TextAlign = ContentAlignment.MiddleLeft };
-    private readonly ToolStripProgressBar _progress = new() { Width = 220 };
+    private readonly ToolStripProgressBar _progress = new() { Width = 160 };
     private readonly ToolStripStatusLabel _update = new() { IsLink = true, Visible = false };
     private UpdateChecker.Update? _available;
 
@@ -56,8 +57,9 @@ public sealed class MainForm : Form
     public MainForm()
     {
         Text = $"Camera Finder {UpdateChecker.CurrentVersion.ToString(3)}";
-        Width = 1100;
-        Height = 720;
+        Width = 1000;
+        Height = 680;
+        MinimumSize = new Size(760, 480);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9F);
         using (var ico = typeof(MainForm).Assembly.GetManifestResourceStream("CameraFinder.App.app.ico"))
@@ -79,50 +81,106 @@ public sealed class MainForm : Form
 
     // ------------------------------------------------------------------ layout
 
+    private static Button Btn(string text, int minWidth = 75, bool bold = false, bool enabled = true) => new()
+    {
+        Text = text, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowOnly, MinimumSize = new Size(minWidth, 28),
+        Padding = new Padding(6, 0, 6, 0), Enabled = enabled, Margin = new Padding(3, 2, 3, 2),
+        Font = bold ? new Font("Segoe UI", 9F, FontStyle.Bold) : null,
+    };
+
+    private static Label Caption(string text, int left = 0) =>
+        new() { Text = text, AutoSize = true, Margin = new Padding(left, 7, 2, 0) };
+
+    // Column share of the list width (percent). Columns are re-fitted whenever the list is resized,
+    // so the whole table is visible without a horizontal scroll bar.
+    private static readonly (string Name, int Share)[] ColumnShares =
+    {
+        ("IP address", 11), ("Manufacturer", 19), ("Type", 8), ("Model / name", 22), ("MAC", 13), ("Ports", 10), ("Found by", 17),
+    };
+
     private void BuildLayout()
     {
-        var top = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 44, Padding = new Padding(6, 8, 6, 0), WrapContents = false };
-        top.Controls.Add(new Label { Text = "Adapter:", AutoSize = true, Margin = new Padding(0, 6, 3, 0) });
-        top.Controls.Add(_adapters);
-        top.Controls.Add(_refresh);
-        top.Controls.Add(new Label { Text = "Listen (s):", AutoSize = true, Margin = new Padding(12, 6, 3, 0) });
-        top.Controls.Add(_listen);
-        _find.Margin = new Padding(12, 4, 3, 0);
-        top.Controls.Add(_find);
-        new ToolTip().SetToolTip(_find, "Type the IP or MAC you are looking for (or the last digits of the MAC on the camera's label). " +
+        // Row 1: adapter (stretches), refresh, Scan, Stop.
+        var row1 = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 5, RowCount = 1, Margin = Padding.Empty };
+        row1.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        row1.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        row1.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        row1.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        row1.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        row1.Controls.Add(Caption("Adapter:"), 0, 0);
+        row1.Controls.Add(_adapters, 1, 0);
+        row1.Controls.Add(_refresh, 2, 0);
+        _scan.Margin = new Padding(12, 2, 3, 2);
+        row1.Controls.Add(_scan, 3, 0);
+        row1.Controls.Add(_stop, 4, 0);
+
+        // Row 2: options. Wraps onto another line rather than hiding anything if the window is narrow.
+        var row2 = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true, Margin = Padding.Empty };
+        row2.Controls.AddRange(new Control[] { Caption("Listen (s):"), _listen, Caption("Stop when found:", 14), _find, _safeMode, _demo });
+
+        var header = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1, RowCount = 2, Padding = new Padding(6, 6, 6, 2),
+        };
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        header.Controls.Add(row1, 0, 0);
+        header.Controls.Add(row2, 0, 1);
+
+        var tips = new ToolTip { AutoPopDelay = 15000 };
+        tips.SetToolTip(_find, "Type the IP or MAC you are looking for (or the last digits of the MAC on the camera's label). " +
             "The scan stops as soon as that device is found. Leave empty to scan everything.");
-        _safeMode.Margin = new Padding(12, 5, 6, 0);
-        top.Controls.Add(_safeMode);
-        _demo.Margin = new Padding(6, 5, 6, 0);
-        top.Controls.Add(_demo);
-        new ToolTip().SetToolTip(_demo, "Scans a simulated site with cameras in several IP ranges. Sends nothing and changes nothing - for testing and training.");
-        top.Controls.Add(_scan);
-        top.Controls.Add(_stop);
+        tips.SetToolTip(_safeMode, "Safe mode: only listen and send discovery requests. Never adds IP addresses to the laptop and never sweeps. " +
+            "Use on sensitive client networks.");
+        tips.SetToolTip(_demo, "Scans a simulated site with cameras in several IP ranges. Sends nothing and changes nothing - for testing and training.");
+        tips.SetToolTip(_ping, "Ping the selected device continuously (like ping -t). Shows when it goes down and comes back.");
+        tips.SetToolTip(_open, "Open the selected device's web page. If it is in another IP range, a temporary IP is added first.");
+        tips.SetToolTip(_removeIps, "Remove the temporary IP addresses this app added to the laptop.");
 
-        foreach (var (name, width) in new[] { ("IP address", 120), ("Manufacturer", 210), ("Type", 85), ("Model / name", 230), ("MAC", 130), ("Ports", 110), ("Found by", 170) })
-            _list.Columns.Add(name, width);
+        foreach (var (name, _) in ColumnShares) _list.Columns.Add(name, 100);
+        _list.ClientSizeChanged += (_, _) => FitColumns();
 
-        var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 38, Padding = new Padding(6, 4, 6, 0) };
-        buttons.Controls.AddRange(new Control[] { _open, _ping, _copy, _export, _removeIps });
-        new ToolTip().SetToolTip(_ping, "Ping the selected device continuously (like ping -t). Shows when it goes down and comes back.");
-        _npcap.Margin = new Padding(16, 7, 0, 0);
-        buttons.Controls.Add(_npcap);
+        // Bottom buttons: device actions on the left, list/laptop actions on the right.
+        var bottom = new TableLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, ColumnCount = 2, RowCount = 1, Padding = new Padding(6, 4, 6, 2) };
+        bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var deviceButtons = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Dock = DockStyle.Fill, Margin = Padding.Empty };
+        deviceButtons.Controls.AddRange(new Control[] { _open, _ping, _copy });
+        var listButtons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = Padding.Empty };
+        listButtons.Controls.AddRange(new Control[] { _export, _removeIps });
+        bottom.Controls.Add(deviceButtons, 0, 0);
+        bottom.Controls.Add(listButtons, 1, 0);
 
         var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal };
         split.Panel1.Controls.Add(_list);
         split.Panel2.Controls.Add(_log);
 
-        var statusStrip = new StatusStrip();
+        var statusStrip = new StatusStrip { ShowItemToolTips = true };
         statusStrip.Items.Add(_status);
+        statusStrip.Items.Add(_npcap);
         statusStrip.Items.Add(_update);
         statusStrip.Items.Add(_progress);
 
+        // Docking is applied from the last control added to the first: status strip, header, buttons, then the list fills the rest.
         Controls.Add(split);
-        Controls.Add(buttons);
-        Controls.Add(top);
+        Controls.Add(bottom);
+        Controls.Add(header);
         Controls.Add(statusStrip);
 
-        Load += (_, _) => split.SplitterDistance = (int)(split.Height * 0.7);
+        Load += (_, _) => { split.SplitterDistance = (int)(split.Height * 0.68); FitColumns(); };
+    }
+
+    private void FitColumns()
+    {
+        int width = _list.ClientSize.Width - 2;
+        if (width < 200 || _list.Columns.Count != ColumnShares.Length) return;
+        int used = 0;
+        for (int i = 0; i < ColumnShares.Length; i++)
+        {
+            int w = i == ColumnShares.Length - 1 ? width - used : width * ColumnShares[i].Share / 100;
+            _list.Columns[i].Width = Math.Max(40, w);
+            used += w;
+        }
     }
 
     private void Wire()
@@ -144,7 +202,7 @@ public sealed class MainForm : Form
         _ping.Click += async (_, _) => await PingSelectedAsync();
         _export.Click += (_, _) => Export();
         _removeIps.Click += (_, _) => RemoveTemporaryAddresses();
-        _npcap.LinkClicked += (_, _) => OpenUrl(PassiveListener.NpcapDownloadUrl);
+        _npcap.Click += (_, _) => { if (_npcap.IsLink) OpenUrl(PassiveListener.NpcapDownloadUrl); };
         _update.Click += async (_, _) => await InstallUpdateAsync();
         FormClosing += OnClosing;
     }
@@ -208,16 +266,12 @@ public sealed class MainForm : Form
 
     private void ShowNpcapStatus()
     {
-        if (PassiveListener.IsAvailable(out _))
-        {
-            _npcap.Text = "Passive listening: on (Npcap found)";
-            _npcap.LinkArea = new LinkArea(0, 0);
-        }
-        else
-        {
-            _npcap.Text = "Passive listening: off - install Npcap to find devices in unknown ranges";
-            _npcap.LinkArea = new LinkArea(_npcap.Text.IndexOf("install", StringComparison.Ordinal), "install Npcap".Length);
-        }
+        bool on = PassiveListener.IsAvailable(out _);
+        _npcap.IsLink = !on;
+        _npcap.Text = on ? "Passive listening: on" : "Passive listening: off - install Npcap";
+        _npcap.ToolTipText = on
+            ? "Npcap found: the app hears devices in IP ranges you don't know."
+            : "Without Npcap, devices in unknown IP ranges are only found if they answer discovery requests. Click to download Npcap.";
     }
 
     private async Task ScanAsync()
