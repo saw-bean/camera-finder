@@ -71,6 +71,35 @@ Many cameras answer their maker's own finder tool even when ONVIF is off, and of
 
 Avigilon, Uniview, Hanwha's newer models and most others are found through ONVIF, SSDP and the ARP sweep. These are read-only "who is there?" requests, so they also run in safe mode. Packet layouts were worked out with help from [UniversalScanner](https://github.com/julienblitte/UniversalScanner) by Julien Blitte; Camera Finder's implementation is its own (see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
 
+## Camera health tools
+
+**Health check** (select a camera, press *Health check*) works out what is wrong with a camera and says so in plain words. It runs in four steps:
+
+1. **Collect** — 20 pings, an mtr-style path trace, ONVIF (model and firmware, the camera's clock, its **system log**, video profiles and stream address) and 8 seconds of the live video stream (with the bundled ffprobe).
+2. **Normalize** — every measurement and every line of the camera's own log is rewritten as one plain sentence. Brands word things differently ("Illegal login", "authentication failure", "Login failed"); they all become *"A login was refused (wrong user name or password) from 192.168.1.10"*.
+3. **Detect** — known failure patterns are matched across the events, for example:
+   | Pattern | What it usually means |
+   |---|---|
+   | Several start-ups in a day, no crash in the log | The camera is losing power: PoE budget, injector, long or CCA cable |
+   | Watchdog / crash restarts | Firmware fault — update, turn off unused features |
+   | Many refused logins from one address, account locked | The NVR/VMS or a phone app still has an old password |
+   | Refused logins from internet addresses | The camera is exposed through a port forward |
+   | Camera clock minutes or hours off | NTP off or unreachable — recordings hard to find, ONVIF logins fail |
+   | Ping loss on the last hop only | The camera's cable, connector or switch port |
+   | Loss starting at an earlier hop | That router/switch link, not the camera |
+   | Fewer frames than configured, pauses in the stream | Packet loss or an overloaded link/camera |
+   | Key frames more than 4 s apart | Slow live view start, coarse NVR seeking |
+   | IP conflict, SD card errors, video loss, overheating, tampering | As named, from the camera's log |
+4. **Explain** — a short diagnosis: the most likely problem first, the evidence, what to try first, then what looked fine and the camera's recent events. *Events* shows the full plain-language timeline and *Collected data* the raw values and log.
+
+The camera's user name and password are needed for the log and video. Tick *Remember* to save the login for that camera, encrypted for your Windows user (DPAPI, `%LOCALAPPDATA%\CameraFinder\logins.dat`); the last login used is offered for the next camera. A camera in another IP range is reached through a temporary IP like *Ping*; its video can only be checked when the laptop has an address of its own in that range (ffprobe always connects from the main address).
+
+**Trace** is mtr for Windows: every router on the way to the device, probed every second, with loss, last/average/best/worst delay and jitter per hop, and a sentence saying where loss starts. On a flat camera network it shows one hop — the device itself.
+
+**Speed test…** runs an iperf3 server on the laptop. At the other end of the cable run (the camera's location, another switch, the NVR rack), run an iperf3 client on a second laptop or phone: `iperf3 -c <laptop IP>` (add `-R` for the other direction, `-u -b 50M` for UDP loss and jitter). Each result is explained: whether it matches a gigabit, 100 Mbit/s or 10 Mbit/s link (100 Mbit/s on a gigabit run is a classic sign of a damaged pair), the UDP loss, and how many cameras the link can carry. Setup adds a Windows Firewall rule for the bundled iperf3 on private and domain networks.
+
+The Demo site has a simulated fault on several cameras (restart loop on 192.168.1.108, NVR with an old password and a slow clock on 192.168.1.64, a lossy cable on 10.0.5.40, a failing SD card on 172.16.8.30), so all of this can be tried without real cameras.
+
 ## Limits
 
 - **One VLAN at a time.** Layer 2 stops at the VLAN boundary — plug into each network separately.

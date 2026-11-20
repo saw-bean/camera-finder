@@ -52,6 +52,10 @@ jobs:
           -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
           -p:Version=${{ steps.ver.outputs.version }} -o publish
 
+      - name: Bundle ffprobe and iperf3 (hash-checked)
+        shell: pwsh
+        run: ./tools/fetch-tools.ps1 -Destination publish/tools
+
       - name: Build installer
         shell: pwsh
         run: |

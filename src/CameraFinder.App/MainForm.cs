@@ -3,6 +3,7 @@ using System.Net;
 using CameraFinder.Core.Capture;
 using CameraFinder.Core.Discovery;
 using CameraFinder.Core.Export;
+using CameraFinder.Core.Health;
 using CameraFinder.Core.Model;
 using CameraFinder.Core.Net;
 
@@ -28,6 +29,10 @@ public sealed class MainForm : Form
     private readonly FluentButton _open = Btn("Open web page", enabled: false);
     private readonly FluentButton _ping = Btn("Ping", enabled: false);
     private readonly FluentButton _copy = Btn("Copy IP", enabled: false);
+    private readonly FluentButton _health = Btn("Health check", enabled: false);
+    private readonly FluentButton _trace = Btn("Trace", enabled: false);
+    private readonly FluentButton _speed = Btn("Speed test…");
+    private readonly CredentialStore _logins = new();
     private readonly FluentButton _export = Btn("Export CSV…");
     private readonly FluentButton _removeIps = Btn("Remove temporary IPs");
     private readonly ToolStripStatusLabel _npcap = new() { Margin = new Padding(12, 3, 0, 2) };
@@ -137,6 +142,10 @@ public sealed class MainForm : Form
         tips.SetToolTip(_demo, "Scans a simulated site with cameras in several IP ranges. Sends nothing and changes nothing - for testing and training.");
         tips.SetToolTip(_ping, "Ping the selected device continuously (like ping -t). Shows when it goes down and comes back.");
         tips.SetToolTip(_open, "Open the selected device's web page. If it is in another IP range, a temporary IP is added first.");
+        tips.SetToolTip(_health, "Check the selected camera's health: ping, path, ONVIF (clock, log, video settings) and its video stream, " +
+            "then explain in plain words what is wrong and what to try.");
+        tips.SetToolTip(_trace, "Trace the path to the selected device like mtr: every router on the way, with loss and delay per hop, updated every second.");
+        tips.SetToolTip(_speed, "Run a bandwidth test server (iperf3) on this laptop, for an iperf3 client at the other end of a cable run.");
         tips.SetToolTip(_removeIps, "Remove the temporary IP addresses this app added to the laptop.");
         tips.SetToolTip(_refresh, "Reload the list of network adapters.");
 
@@ -173,9 +182,9 @@ public sealed class MainForm : Form
         bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         var deviceButtons = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Dock = DockStyle.Fill, Margin = Padding.Empty };
         _open.Primary = true;
-        deviceButtons.Controls.AddRange(new Control[] { _open, _ping, _copy });
+        deviceButtons.Controls.AddRange(new Control[] { _open, _health, _ping, _trace, _copy });
         var listButtons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = Padding.Empty };
-        listButtons.Controls.AddRange(new Control[] { _export, _removeIps });
+        listButtons.Controls.AddRange(new Control[] { _speed, _export, _removeIps });
         bottom.Controls.Add(deviceButtons, 0, 0);
         bottom.Controls.Add(listButtons, 1, 0);
 
@@ -226,6 +235,14 @@ public sealed class MainForm : Form
             await PingSelectedAsync();
             await Task.Delay(5000);
             if (OwnedForms.LastOrDefault() is { } ping) { Snap(ping, Path.Combine(folder, $"{theme}-4-ping.png")); ping.Close(); }
+
+            if (_engine?.Devices.FirstOrDefault(d => d.Ip.ToString() == "192.168.1.108") is { } dahua) SelectRow(dahua);
+            await HealthSelectedAsync();
+            await Task.Delay(12000); // demo check: pings, trace, ONVIF and a short "video" watch
+            if (OwnedForms.LastOrDefault() is { } health) { Snap(health, Path.Combine(folder, $"{theme}-6-health.png")); health.Close(); }
+            await TraceSelectedAsync();
+            await Task.Delay(4000);
+            if (OwnedForms.LastOrDefault() is { } trace) { Snap(trace, Path.Combine(folder, $"{theme}-7-trace.png")); trace.Close(); }
 
             WindowState = FormWindowState.Normal;
             Size = MinimumSize;
@@ -281,6 +298,9 @@ public sealed class MainForm : Form
             catch (Exception ex) { AppendLog("Could not copy to the clipboard: " + ex.Message); } // clipboard held by another app
         };
         _ping.Click += async (_, _) => await PingSelectedAsync();
+        _health.Click += async (_, _) => await HealthSelectedAsync();
+        _trace.Click += async (_, _) => await TraceSelectedAsync();
+        _speed.Click += (_, _) => new SpeedTestWindow(this).Show(this);
         _export.Click += (_, _) => Export();
         _removeIps.Click += (_, _) => RemoveTemporaryAddresses();
         _npcap.Click += (_, _) => { if (_npcap.IsLink) OpenUrl(PassiveListener.NpcapDownloadUrl); };
@@ -473,6 +493,8 @@ public sealed class MainForm : Form
         _open.Enabled = d != null && !_opening;
         _copy.Enabled = d != null;
         _ping.Enabled = d != null && !_opening;
+        _health.Enabled = d != null && !_opening;
+        _trace.Enabled = d != null && !_opening;
     }
 
     /// <summary>
@@ -540,44 +562,53 @@ public sealed class MainForm : Form
         }
     }
 
+    /// <summary>The selected device and the laptop address to reach it from (null = let Windows choose).</summary>
+    private sealed record Reachable(Device Device, IPAddress? Source, bool Temporary);
+
     /// <summary>
-    /// Opens a continuous-ping window for the selected device. If the laptop is not in the device's range, a temporary
-    /// IP is added first (asking in safe mode), and pings are sent from it.
+    /// Gets the selected device ready for a ping, trace or health check: stops a running scan and, if the laptop is not
+    /// in the device's range, adds a temporary IP first (asking in safe mode). Null if the user cancelled.
     /// </summary>
-    private async Task PingSelectedAsync()
+    private async Task<Reachable?> ReachSelectedAsync(string action)
     {
         var d = Selected();
-        if (d == null || _opening) return;
-        if (_web == null || _engine == null) { AppendLog("Run a scan first."); return; }
-        if (_stop.Enabled) await StopScanAsync($"Stopping the scan to ping {d.Ip}…");
+        if (d == null || _opening) return null;
+        if (_web == null || _engine == null) { AppendLog("Run a scan first."); return null; }
+        if (_stop.Enabled) await StopScanAsync($"Stopping the scan to {action.ToLowerInvariant()} {d.Ip}…");
 
+        var avoid = _engine.Devices.Select(x => x.Ip).ToHashSet();
+        var reach = await _web.EnsureReachableAsync(d.Ip, mayJoin: !_safeMode.Checked, avoid, CancellationToken.None);
+        if (reach.Status == WebPageStatus.NeedsTemporaryAddress)
+        {
+            var answer = MessageBox.Show(this,
+                $"{d.Ip} is in {reach.Range}, a range this laptop is not in, so it will not answer.\n\n" +
+                "Add a temporary IP address in that range first?\n\n" +
+                "Safe mode is on: this changes the laptop's network settings until you press \"Remove temporary IPs\" or close the app.",
+                action, MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+            if (answer == DialogResult.Cancel) return null;
+            if (answer == DialogResult.Yes) reach = await _web.EnsureReachableAsync(d.Ip, mayJoin: true, avoid, CancellationToken.None);
+        }
+        if (reach.TemporaryAddress != null)
+            AppendLog($"Added temporary IP {reach.TemporaryAddress} in {reach.Range} to reach {d.Ip}{(_demoSite != null ? " (demo)" : "")}.");
+        if (reach.Status == WebPageStatus.JoinFailed)
+            AppendLog($"Could not add a temporary IP in {reach.Range}; trying anyway (replies are unlikely).");
+
+        bool temporary = _demoSite == null && reach.Source != null && _temp.Added.Any(a => a.Ip == reach.Source.ToString());
+        return new Reachable(d, reach.Source, temporary);
+    }
+
+    private async Task OpenToolAsync(string action, Func<Reachable, Form> create)
+    {
+        if (_opening) return;
         _opening = true;
         UpdateButtons();
         try
         {
-            var avoid = _engine.Devices.Select(x => x.Ip).ToHashSet();
-            var reach = await _web.EnsureReachableAsync(d.Ip, mayJoin: !_safeMode.Checked, avoid, CancellationToken.None);
-            if (reach.Status == WebPageStatus.NeedsTemporaryAddress)
-            {
-                var answer = MessageBox.Show(this,
-                    $"{d.Ip} is in {reach.Range}, a range this laptop is not in, so it will not answer pings.\n\n" +
-                    "Add a temporary IP address in that range first?\n\n" +
-                    "Safe mode is on: this changes the laptop's network settings until you press \"Remove temporary IPs\" or close the app.",
-                    "Ping", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
-                if (answer == DialogResult.Cancel) return;
-                if (answer == DialogResult.Yes) reach = await _web.EnsureReachableAsync(d.Ip, mayJoin: true, avoid, CancellationToken.None);
-            }
-            if (reach.TemporaryAddress != null)
-                AppendLog($"Added temporary IP {reach.TemporaryAddress} in {reach.Range} to reach {d.Ip}{(_demoSite != null ? " (demo)" : "")}.");
-            if (reach.Status == WebPageStatus.JoinFailed)
-                AppendLog($"Could not add a temporary IP in {reach.Range}; pinging anyway (replies are unlikely).");
-
-            IPinger pinger = _demoSite != null ? _demoSite : new IcmpPinger();
-            new PingWindow(pinger, d.Ip, reach.Source, d.Description, this).Show(this);
+            if (await ReachSelectedAsync(action) is { } r) create(r).Show(this);
         }
         catch (Exception ex)
         {
-            AppendLog($"Could not ping {d.Ip}: {ex.Message}");
+            AppendLog($"{action} failed: {ex.Message}");
         }
         finally
         {
@@ -585,6 +616,28 @@ public sealed class MainForm : Form
             UpdateButtons();
         }
     }
+
+    /// <summary>
+    /// Opens a continuous-ping window for the selected device. If the laptop is not in the device's range, a temporary
+    /// IP is added first (asking in safe mode), and pings are sent from it.
+    /// </summary>
+    private Task PingSelectedAsync() => OpenToolAsync("Ping", r =>
+        new PingWindow(_demoSite != null ? _demoSite : new IcmpPinger(), r.Device.Ip, r.Source, r.Device.Description, this));
+
+    /// <summary>mtr-style trace window for the selected device.</summary>
+    private Task TraceSelectedAsync() => OpenToolAsync("Trace", r =>
+        new TraceWindow(_demoSite != null ? new DemoHealth(_demoSite) : new IcmpHopProber(), r.Device.Ip, r.Source, r.Device.Description, this));
+
+    /// <summary>Health check window for the selected device. The demo site has its own simulated cameras, logs and streams.</summary>
+    private Task HealthSelectedAsync() => OpenToolAsync("Health check", r =>
+    {
+        if (_demoSite != null)
+        {
+            var demo = new DemoHealth(_demoSite);
+            return new HealthWindow(r.Device, new HealthCheck(demo, demo, demo, demo), r.Source, false, null, new Credentials("admin", "demo"), this);
+        }
+        return new HealthWindow(r.Device, HealthCheck.CreateDefault(), r.Source, r.Temporary, _logins, null, this);
+    });
 
     /// <summary>
     /// Opens a URL in the user's normal browser. Launching through explorer.exe means the browser does not
