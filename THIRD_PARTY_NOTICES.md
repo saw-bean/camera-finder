@@ -41,3 +41,28 @@ protocols.
 
 Passive listening uses Npcap if the user has installed it separately (https://npcap.com). Npcap is not
 redistributed with this software.
+
+## FFmpeg (ffprobe.exe, included)
+
+The installer includes `tools\ffprobe.exe` from FFmpeg 9.0.2 (the "essentials" static Windows build by gyan.dev),
+used by the health check to watch a camera's video stream. It is a separate program that Camera Finder runs; it is
+not linked into Camera Finder.
+
+FFmpeg is licensed under the GNU General Public License version 3 (this build includes GPL components). The full
+licence text is installed as `tools\licenses\FFmpeg-LICENSE.txt`. The corresponding source code is available at
+https://github.com/FFmpeg/FFmpeg/commit/946fcce07b (build configuration: https://www.gyan.dev/ffmpeg/builds/);
+`tools\licenses\SOURCES.txt` lists the same addresses.
+
+## iperf3 and Cygwin (iperf3.exe, cygwin1.dll, included)
+
+The installer includes `tools\iperf3.exe` (iperf3 3.22, Windows build by ar51an/iperf3-win-builds) and the
+`cygwin1.dll` it needs, used by the speed test server. They are separate programs that Camera Finder runs.
+
+- iperf3 — BSD 3-Clause style licence, © The Regents of the University of California, through Lawrence Berkeley
+  National Laboratory. The full licence (including the notices for the code iperf3 contains) is installed as
+  `tools\licenses\iperf3-LICENSE.txt`. Source: https://github.com/esnet/iperf/releases/tag/3.22
+- Cygwin (`cygwin1.dll`) — GNU Lesser General Public License version 3 (https://www.gnu.org/licenses/lgpl-3.0.html,
+  which builds on the GPL v3 installed as `tools\licenses\FFmpeg-LICENSE.txt`). Source: https://cygwin.com/
+
+Both are downloaded at build time from pinned releases and checked against a SHA-256 before they are packaged (see
+`tools/fetch-tools.ps1`).
