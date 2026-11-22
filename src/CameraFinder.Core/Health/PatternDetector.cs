@@ -40,6 +40,7 @@ public static class PatternDetector
         Single(events, f, EventKind.Tamper, "tamper", Severity.Warning, "The camera reported tampering",
             "Check the view: the lens may be covered, sprayed, knocked out of position or out of focus.");
         Stream(s, f);
+        Port(s, f);
         Address(s, f);
         return f.OrderByDescending(x => x.Severity).ThenBy(x => Rank(x.Code)).ToList();
     }
@@ -47,7 +48,7 @@ public static class PatternDetector
     // Within the same severity: what stops the camera working, or gets worse by itself, comes first.
     private static readonly string[] Priority =
     {
-        "offline", "services-down", "restart-loop", "locked", "ip-conflict", "power", "packet-loss", "stream-failed",
+        "offline", "port-down", "services-down", "restart-loop", "link-10m", "half-duplex", "crc-errors", "locked", "ip-conflict", "power", "packet-loss", "stream-failed",
         "video-loss", "heat", "failed-logins", "onvif-login", "link-flap", "clock", "frame-drops", "stream-stall",
         "latency", "storage", "memory", "tamper", "not-activated", "link-local", "ntp", "long-gop", "ping-blocked",
     };
@@ -301,6 +302,40 @@ public static class PatternDetector
             f.Add(new Finding("long-gop", Severity.Notice, "Key frames are far apart",
                 $"A key frame (I-frame) arrives only every {k:0.#} s. Live view is slow to start and the NVR can only jump to those points.",
                 new[] { $"Set the I-frame interval to about twice the frame rate (e.g. {Math.Round((nominal ?? 25) * 2)}) unless you use smart codec on purpose to save storage." }));
+    }
+
+    private static void Port(HealthSnapshot s, List<Finding> f)
+    {
+        if (s.Port is not { } p) return;
+        string where = p.Describe();
+        if (p.Up == false)
+            f.Add(new Finding("port-down", Severity.Problem, "The switch port has no link",
+                $"{where} reports its link as down.",
+                new[] { "Check the patch cable and the run to the device; check the device has power." }));
+        if (p.Duplex == "half")
+            f.Add(new Finding("half-duplex", Severity.Problem, "The switch port runs at half duplex",
+                $"{where} negotiated half duplex. Modern devices run full duplex; half duplex almost always means one end is forced to a fixed speed or the cable is damaged.",
+                new[]
+                {
+                    "Set speed and duplex to auto on both the switch port and the device.",
+                    "If it stays at half duplex, re-terminate or replace the cable.",
+                }));
+        if (p.SpeedMbps is > 0 and <= 10)
+            f.Add(new Finding("link-10m", Severity.Problem, "The link is running at only 10 Mbit/s",
+                $"{where} negotiated {p.SpeedMbps} Mbit/s. That is too slow for video and usually means a damaged pair or a bad connector.",
+                new[] { "Re-terminate both ends and test the run with a cable tester; check for couplers or splices." }));
+        if (p.ErrorsDuringCheck is > 0)
+            f.Add(new Finding("crc-errors", p.ErrorsDuringCheck > 20 ? Severity.Problem : Severity.Warning, "The cable is damaging frames (CRC errors)",
+                $"While the device was watched, {where} counted {p.ErrorsDuringCheck} frames that arrived damaged.",
+                new[]
+                {
+                    "Re-terminate the connectors at both ends; replace the patch cord.",
+                    "Test the run with a cable tester. Long runs near 100 m, outdoor runs and CCA cable are common causes.",
+                }));
+        if (p.MacsOnPort > 3)
+            f.Add(new Finding("shared-port", Severity.Info, "The device shares its switch port with others",
+                $"{where} has {p.MacsOnPort} devices learned on it, so the device is behind another switch (or the port is an uplink); its port traffic includes theirs.",
+                new[] { "To see this device's own traffic, check the switch it is really plugged into (it may be unmanaged)." }));
     }
 
     private static void Address(HealthSnapshot s, List<Finding> f)

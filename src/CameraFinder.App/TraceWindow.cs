@@ -10,8 +10,13 @@ namespace CameraFinder.App;
 public sealed class TraceWindow : Form
 {
     private readonly PathTracer _tracer;
-    private readonly IPAddress _target;
-    private readonly IPAddress? _source;
+    private IPAddress _target;
+    private IPAddress? _source;
+    private readonly IPAddress _device;
+    private readonly IPAddress? _deviceSource;
+    private readonly string _description;
+    private readonly TextBox _address = new() { Width = 200, Margin = new Padding(3, 5, 3, 3), PlaceholderText = "IP or name, e.g. 8.8.8.8" };
+    private readonly FluentButton _go = new() { Text = "Trace", Primary = true, MinimumSize = new Size(70, 32) };
     private readonly FluentListView _hops = new() { Dock = DockStyle.Fill, MultiSelect = false, FullRowSelect = true, HeaderStyle = ColumnHeaderStyle.Nonclickable };
     private readonly Label _summary = new() { Dock = DockStyle.Bottom, Height = 44, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(4, 0, 0, 0) };
     private readonly Label _rounds = new() { AutoSize = true, Margin = new Padding(10, 9, 3, 0), Tag = "secondary" };
@@ -30,9 +35,11 @@ public sealed class TraceWindow : Form
     public TraceWindow(IHopProber prober, IPAddress target, IPAddress? source, string description, Form? owner = null)
     {
         _tracer = new PathTracer(prober);
-        _target = target;
-        _source = source;
-        Text = $"Trace (mtr) {target}" + (string.IsNullOrWhiteSpace(description) ? "" : $" - {description}");
+        _target = _device = target;
+        _source = _deviceSource = source;
+        _description = description;
+        _address.Text = target.ToString();
+        SetTitle();
         Width = 720;
         Height = 420;
         MinimumSize = new Size(560, 300);
@@ -44,7 +51,7 @@ public sealed class TraceWindow : Form
         _hops.SmallImageList = new ImageList { ImageSize = new Size(1, 26) };
         _hops.HighlightColumn = 2; // loss % in red on lossy hops
         var bar = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false, Padding = new Padding(0, 0, 0, 6) };
-        bar.Controls.AddRange(new Control[] { _startStop, _copy, _rounds });
+        bar.Controls.AddRange(new Control[] { new Label { Text = "To", AutoSize = true, Margin = new Padding(0, 9, 2, 0) }, _address, _go, _startStop, _copy, _rounds });
         var card = new FluentCard { Dock = DockStyle.Fill, RowCount = 1 };
         card.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         card.Controls.Add(_hops, 0, 0);
@@ -54,6 +61,8 @@ public sealed class TraceWindow : Form
         Theme.Apply(this);
 
         _startStop.Click += (_, _) => { if (_cts == null) Start(); else Stop(); };
+        _go.Click += async (_, _) => await TraceToAsync(_address.Text.Trim());
+        _address.KeyDown += async (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; await TraceToAsync(_address.Text.Trim()); } };
         _copy.Click += (_, _) =>
         {
             if (_last == null) return;
@@ -61,6 +70,34 @@ public sealed class TraceWindow : Form
         };
         Shown += (_, _) => Start();
         FormClosed += (_, _) => Stop();
+    }
+
+    private void SetTitle() =>
+        Text = $"Trace (mtr) {_target}" + (_target.Equals(_device) && !string.IsNullOrWhiteSpace(_description) ? $" - {_description}" : "");
+
+    /// <summary>Trace to any address or host name (NVR, gateway, 8.8.8.8, a remote site...).</summary>
+    private async Task TraceToAsync(string text)
+    {
+        if (text.Length == 0) return;
+        IPAddress? ip = null;
+        if (!IPAddress.TryParse(text, out ip))
+        {
+            try { ip = (await System.Net.Dns.GetHostAddressesAsync(text)).FirstOrDefault(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork); }
+            catch (Exception) { ip = null; }
+        }
+        if (ip == null || ip.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+        {
+            _summary.Text = $"\"{text}\" is not an IPv4 address or a name that resolves to one.";
+            return;
+        }
+        Stop();
+        _target = ip;
+        // The device's own (possibly temporary) source address only makes sense for the device; let Windows pick otherwise.
+        _source = ip.Equals(_device) ? _deviceSource : null;
+        _hops.Items.Clear();
+        _last = null;
+        SetTitle();
+        Start();
     }
 
     private void Start()

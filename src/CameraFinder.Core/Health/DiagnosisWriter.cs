@@ -136,6 +136,14 @@ public static class DiagnosisWriter
                 sb.AppendLine($"  {v.Codec} {v.Width}x{v.Height}, nominal {v.NominalFps:0.##} fps, measured {v.MeasuredFps:0.##} fps over {v.SecondsWatched:0.#} s ({v.Frames} frames), " +
                               $"{v.BitrateKbps:0} kbit/s, key frame every {v.KeyframeInterval:0.##} s, longest gap {v.LongestGap:0.##} s");
         }
+        if (s.Port is { } port)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"[Switch port] {port.Describe()}  ifIndex {port.IfIndex}");
+            sb.AppendLine($"  link {(port.Up switch { true => "up", false => "down", null => "?" })}, speed {port.SpeedMbps} Mbit/s, duplex {port.Duplex ?? "?"}, " +
+                          $"MACs on port {port.MacsOnPort}, from device {port.FromDeviceKbps:0} kbit/s, to device {port.ToDeviceKbps:0} kbit/s, errors while watched {port.ErrorsDuringCheck}");
+            sb.AppendLine($"  switch: {port.Switch.Description}");
+        }
         foreach (var n in s.NotChecked) sb.AppendLine("(" + n + ")");
         return sb.ToString();
     }
@@ -164,6 +172,10 @@ public static class DiagnosisWriter
             fine.Add("its clock is right");
         if (s.Stream is { Opened: true } v && !Has("frame-drops") && !Has("stream-stall"))
             fine.Add($"video plays smoothly at {v.MeasuredFps:0.#} fps" + (v.Width != null ? $", {v.Width}x{v.Height}" : ""));
+        if (s.Port is { Up: not false } port && !Has("half-duplex") && !Has("link-10m") && !Has("crc-errors"))
+            fine.Add($"its switch port ({port.PortName ?? port.IfIndex.ToString()}) is clean" +
+                     (port.SpeedMbps is { } sp ? $" at {(sp >= 1000 ? $"{sp / 1000.0:0.#} Gbit/s" : $"{sp} Mbit/s")}" : "") +
+                     (port.Duplex == "full" ? " full duplex" : ""));
         if (s.Onvif?.SystemLog != null && !findings.Any(x => x.Code is "restart-loop" or "link-flap" or "failed-logins" or "locked"))
             fine.Add("the camera's log shows no restarts, link drops or login trouble worth worrying about");
         return fine;
