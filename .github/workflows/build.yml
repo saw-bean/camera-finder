@@ -26,7 +26,7 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends ffmpeg
           for auth in digest basic; do
-            tools/rtsp-test-server.sh "$RUNNER_TEMP/rtsp" "$auth"
+            bash tools/rtsp-test-server.sh "$RUNNER_TEMP/rtsp" "$auth"
             RTSP_TEST_URL=rtsp://127.0.0.1:8554/cam RTSP_TEST_AUTH=$auth \
               dotnet tests/CameraFinder.Core.Tests/bin/Release/net8.0/CameraFinder.Core.Tests.dll --unit-only | tee "$RUNNER_TEMP/out-$auth.txt"
             kill $(cat "$RUNNER_TEMP/rtsp/pids") || true
