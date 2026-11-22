@@ -51,6 +51,13 @@ public static class DiagnosisWriter
             foreach (var a in n.Advice) sb.AppendLine($"  - {a}");
         }
 
+        if (s.Delay is { } d && (d.TimeToPicture != null || d.BufferNeededMs != null || d.CameraDelay != null))
+        {
+            sb.AppendLine();
+            sb.AppendLine("Live view delay, measured straight from the camera (no NVR in between):");
+            foreach (var line in DelayLines(d)) sb.AppendLine("  - " + line);
+        }
+
         var fine = WhatLooksFine(s, findings);
         if (fine.Count > 0)
         {
@@ -78,6 +85,25 @@ public static class DiagnosisWriter
             foreach (var n in s.NotChecked) sb.AppendLine($"  - {n}");
         }
         return sb.ToString().TrimEnd() + Environment.NewLine;
+    }
+
+    public static IEnumerable<string> DelayLines(DelayReport d)
+    {
+        if (d.TimeToPicture is { } ttp)
+            yield return $"First picture after {ttp:0.#} s" + (d.ConnectSeconds is { } c ? $" (connecting {c:0.#} s, then waiting {ttp - c:0.#} s for a key frame)" : "") + ".";
+        if (d.BufferNeededMs is { } b)
+            yield return b < 150 ? $"Frames arrive evenly: a player needs only about {b:0} ms of buffer."
+                                 : $"Frames arrive in bursts: a player needs about {b / 1000:0.##} s of buffer to play smoothly.";
+        if (d.FallingBehindPerMinute is { } fb)
+            yield return fb < 0.2 ? $"Keeping up with real time (watched {d.SecondsWatched / 60:0.#} min)." : $"Falling behind by {fb:0.#} s per minute.";
+        else if (d.SecondsWatched > 0)
+            yield return $"Whether delay builds up over time shows after 40 s of watching (now {d.SecondsWatched:0} s).";
+        if (d.CameraDelay is { } cam)
+            yield return $"Camera + network delay (flash test): {cam:0.##} s ({d.FlashesSeen} of {d.FlashesShown} flashes seen, {d.CameraDelayMin:0.##}-{d.CameraDelayMax:0.##} s).";
+        else if (d.FlashesShown > 0)
+            yield return $"The flash test did not see the flashes ({d.FlashesShown} shown): point the camera at the screen so the pattern fills most of the picture, and try again.";
+        else
+            yield return "Camera + network delay: not measured yet - press \"Measure camera delay\" and point the camera at the laptop screen.";
     }
 
     /// <summary>The events as a timeline, one plain sentence per line.</summary>
@@ -136,6 +162,14 @@ public static class DiagnosisWriter
                 sb.AppendLine($"  {v.Codec} {v.Width}x{v.Height}, nominal {v.NominalFps:0.##} fps, measured {v.MeasuredFps:0.##} fps over {v.SecondsWatched:0.#} s ({v.Frames} frames), " +
                               $"{v.BitrateKbps:0} kbit/s, key frame every {v.KeyframeInterval:0.##} s, longest gap {v.LongestGap:0.##} s");
         }
+        if (s.Port is { } port)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"[Switch port] {port.Describe()}  ifIndex {port.IfIndex}");
+            sb.AppendLine($"  link {(port.Up switch { true => "up", false => "down", null => "?" })}, speed {port.SpeedMbps} Mbit/s, duplex {port.Duplex ?? "?"}, " +
+                          $"MACs on port {port.MacsOnPort}, from device {port.FromDeviceKbps:0} kbit/s, to device {port.ToDeviceKbps:0} kbit/s, errors while watched {port.ErrorsDuringCheck}");
+            sb.AppendLine($"  switch: {port.Switch.Description}");
+        }
         foreach (var n in s.NotChecked) sb.AppendLine("(" + n + ")");
         return sb.ToString();
     }
@@ -164,6 +198,10 @@ public static class DiagnosisWriter
             fine.Add("its clock is right");
         if (s.Stream is { Opened: true } v && !Has("frame-drops") && !Has("stream-stall"))
             fine.Add($"video plays smoothly at {v.MeasuredFps:0.#} fps" + (v.Width != null ? $", {v.Width}x{v.Height}" : ""));
+        if (s.Port is { Up: not false } port && !Has("half-duplex") && !Has("link-10m") && !Has("crc-errors"))
+            fine.Add($"its switch port ({port.PortName ?? port.IfIndex.ToString()}) is clean" +
+                     (port.SpeedMbps is { } sp ? $" at {(sp >= 1000 ? $"{sp / 1000.0:0.#} Gbit/s" : $"{sp} Mbit/s")}" : "") +
+                     (port.Duplex == "full" ? " full duplex" : ""));
         if (s.Onvif?.SystemLog != null && !findings.Any(x => x.Code is "restart-loop" or "link-flap" or "failed-logins" or "locked"))
             fine.Add("the camera's log shows no restarts, link drops or login trouble worth worrying about");
         return fine;

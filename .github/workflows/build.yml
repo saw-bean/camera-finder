@@ -34,6 +34,16 @@ jobs:
             grep -q "PASS TestLiveBandwidthAgainstARealRtspServer" "$RUNNER_TEMP/out-$auth.txt" || { cat "$RUNNER_TEMP/rtsp/"*.log; exit 1; }
           done
 
+      - name: SNMP client against a real agent (net-snmp snmpd)
+        run: |
+          sudo apt-get install -y --no-install-recommends snmpd
+          printf 'agentaddress udp:127.0.0.1:1161\nrocommunity public 127.0.0.1\n' > "$RUNNER_TEMP/snmpd.conf"
+          sudo snmpd -C -c "$RUNNER_TEMP/snmpd.conf" -Lf "$RUNNER_TEMP/snmpd.log" -p "$RUNNER_TEMP/snmpd.pid"
+          sleep 2
+          SNMP_TEST_AGENT=127.0.0.1:1161 dotnet tests/CameraFinder.Core.Tests/bin/Release/net8.0/CameraFinder.Core.Tests.dll --unit-only | tee "$RUNNER_TEMP/out-snmp.txt"
+          sudo kill $(cat "$RUNNER_TEMP/snmpd.pid") || true
+          grep -q "PASS TestSnmpAgainstARealAgent" "$RUNNER_TEMP/out-snmp.txt" || { cat "$RUNNER_TEMP/snmpd.log"; exit 1; }
+
       - name: Live network tests (fake camera on this machine)
         # Need raw capture and port 80, so run as root. Hosted runners may restrict multicast, so don't fail the build.
         continue-on-error: true

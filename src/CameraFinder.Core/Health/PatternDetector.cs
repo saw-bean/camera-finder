@@ -40,6 +40,8 @@ public static class PatternDetector
         Single(events, f, EventKind.Tamper, "tamper", Severity.Warning, "The camera reported tampering",
             "Check the view: the lens may be covered, sprayed, knocked out of position or out of focus.");
         Stream(s, f);
+        Port(s, f);
+        LiveViewDelay(s, f);
         Address(s, f);
         return f.OrderByDescending(x => x.Severity).ThenBy(x => Rank(x.Code)).ToList();
     }
@@ -47,9 +49,9 @@ public static class PatternDetector
     // Within the same severity: what stops the camera working, or gets worse by itself, comes first.
     private static readonly string[] Priority =
     {
-        "offline", "services-down", "restart-loop", "locked", "ip-conflict", "power", "packet-loss", "stream-failed",
+        "offline", "port-down", "services-down", "restart-loop", "link-10m", "half-duplex", "crc-errors", "locked", "ip-conflict", "power", "packet-loss", "stream-failed",
         "video-loss", "heat", "failed-logins", "onvif-login", "link-flap", "clock", "frame-drops", "stream-stall",
-        "latency", "storage", "memory", "tamper", "not-activated", "link-local", "ntp", "long-gop", "ping-blocked",
+        "latency", "falling-behind", "camera-slow", "slow-open", "bursty", "storage", "memory", "tamper", "not-activated", "link-local", "ntp", "long-gop", "ping-blocked",
     };
 
     private static int Rank(string code) { int i = Array.IndexOf(Priority, code); return i < 0 ? Priority.Length : i; }
@@ -301,6 +303,99 @@ public static class PatternDetector
             f.Add(new Finding("long-gop", Severity.Notice, "Key frames are far apart",
                 $"A key frame (I-frame) arrives only every {k:0.#} s. Live view is slow to start and the NVR can only jump to those points.",
                 new[] { $"Set the I-frame interval to about twice the frame rate (e.g. {Math.Round((nominal ?? 25) * 2)}) unless you use smart codec on purpose to save storage." }));
+    }
+
+    private static void Port(HealthSnapshot s, List<Finding> f)
+    {
+        if (s.Port is not { } p) return;
+        string where = p.Describe();
+        if (p.Up == false)
+            f.Add(new Finding("port-down", Severity.Problem, "The switch port has no link",
+                $"{where} reports its link as down.",
+                new[] { "Check the patch cable and the run to the device; check the device has power." }));
+        if (p.Duplex == "half")
+            f.Add(new Finding("half-duplex", Severity.Problem, "The switch port runs at half duplex",
+                $"{where} negotiated half duplex. Modern devices run full duplex; half duplex almost always means one end is forced to a fixed speed or the cable is damaged.",
+                new[]
+                {
+                    "Set speed and duplex to auto on both the switch port and the device.",
+                    "If it stays at half duplex, re-terminate or replace the cable.",
+                }));
+        if (p.SpeedMbps is > 0 and <= 10)
+            f.Add(new Finding("link-10m", Severity.Problem, "The link is running at only 10 Mbit/s",
+                $"{where} negotiated {p.SpeedMbps} Mbit/s. That is too slow for video and usually means a damaged pair or a bad connector.",
+                new[] { "Re-terminate both ends and test the run with a cable tester; check for couplers or splices." }));
+        if (p.ErrorsDuringCheck is > 0)
+            f.Add(new Finding("crc-errors", p.ErrorsDuringCheck > 20 ? Severity.Problem : Severity.Warning, "The cable is damaging frames (CRC errors)",
+                $"While the device was watched, {where} counted {p.ErrorsDuringCheck} frames that arrived damaged.",
+                new[]
+                {
+                    "Re-terminate the connectors at both ends; replace the patch cord.",
+                    "Test the run with a cable tester. Long runs near 100 m, outdoor runs and CCA cable are common causes.",
+                }));
+        if (p.MacsOnPort > 3)
+            f.Add(new Finding("shared-port", Severity.Info, "The device shares its switch port with others",
+                $"{where} has {p.MacsOnPort} devices learned on it, so the device is behind another switch (or the port is an uplink); its port traffic includes theirs.",
+                new[] { "To see this device's own traffic, check the switch it is really plugged into (it may be unmanaged)." }));
+    }
+
+    private static void LiveViewDelay(HealthSnapshot s, List<Finding> f)
+    {
+        if (s.Delay is not { } d) return;
+        if (d.TimeToPicture is > 3 and var ttp)
+        {
+            double connect = d.ConnectSeconds ?? 0, wait = ttp - connect;
+            var advice = new List<string>();
+            if (wait > connect)
+            {
+                advice.Add("Most of the wait is for a key frame: shorten the I-frame interval (about twice the frame rate) and turn off smart codec (H.264+/H.265+, Smart Codec, WiseStream dynamic GOP), which spaces key frames up to 10 s apart.");
+            }
+            else
+            {
+                advice.Add("Most of the wait is the camera answering the video request: it may be overloaded (too many viewers or analytics) - close other viewers and restart it.");
+                advice.Add("Update the firmware if it stays slow to answer.");
+            }
+            f.Add(new Finding("slow-open", Severity.Warning, $"Live view is slow to open ({ttp:0.#} s to the first picture)",
+                $"Connecting took {connect:0.#} s and the first complete picture arrived {wait:0.#} s after that.", advice));
+        }
+        if (d.FallingBehindPerMinute is > 0.5 and var behind)
+            f.Add(new Finding("falling-behind", Severity.Problem, "Live view delay builds up over time",
+                $"Over {d.SecondsWatched / 60:0.#} minutes the stream fell {behind:0.#} s further behind every minute: the path cannot carry the video as fast as the camera makes it, so it queues up.",
+                new[]
+                {
+                    "Check the switch port and uplinks (Switch port bandwidth section): a 100 Mbit/s or busy link, or a Wi-Fi bridge, in the path.",
+                    "Lower the camera's bitrate, or view the sub-stream.",
+                }));
+        if (d.BufferNeededMs is > 300 and var buf)
+            f.Add(new Finding("bursty", Severity.Warning, "Video arrives in bursts, so players must buffer",
+                $"Frames arrive unevenly: to play smoothly a viewer has to hold back about {buf / 1000:0.##} s of video, and that buffer is delay.",
+                new[]
+                {
+                    "Bursts usually come from key frames bigger than the link can send quickly: use constant bitrate (CBR) or lower the maximum bitrate.",
+                    "Look for a slow or busy link in the path (Wi-Fi bridge, 100 Mbit/s uplink, overloaded switch).",
+                }));
+        if (d.CameraDelay is { } cam)
+        {
+            if (cam > 1.0)
+                f.Add(new Finding("camera-slow", Severity.Problem, $"The camera itself is slow: {cam:0.##} s from picture to network",
+                    $"The flash test measured {cam:0.##} s ({d.FlashesSeen} of {d.FlashesShown} flashes, {d.CameraDelayMin:0.##}-{d.CameraDelayMax:0.##} s) before a change in front of the lens reached the laptop. A camera normally takes 0.1-0.5 s.",
+                    new[]
+                    {
+                        "Turn off smart codec (H.264+/H.265+), and reduce 3D noise reduction, WDR and slow shutter / low-light modes, which hold frames back.",
+                        "If the camera has a low-latency or real-time mode, turn it on.",
+                        "Restart the camera and update its firmware; if it stays slow, its encoder is overloaded - lower resolution or turn off extra streams and analytics.",
+                    }));
+            else
+                f.Add(new Finding("delay-after-camera", Severity.Notice, $"The camera and network are fast ({cam:0.##} s)",
+                    $"The flash test measured {cam:0.##} s from a change in front of the lens to the video reaching the laptop. If the live view you watch lags more than about {cam + 0.4:0.#} s, the extra delay is added after the camera.",
+                    new[]
+                    {
+                        "Viewing software buffer: set it to lowest delay (e.g. Hikvision iVMS-4200 / HikCentral: Play Performance = Shortest Delay; Dahua SmartPSS: real-time priority instead of fluency).",
+                        "Cloud / P2P apps (Hik-Connect, DMSS, other phone apps) relay video through the internet and add seconds: compare with viewing on the local network.",
+                        "NVR overloaded: many 4K channels on the NVR's own monitor or a full incoming bandwidth. Use sub-streams for multi-view and check the NVR's switch port.",
+                        "Viewing PC: H.265 4K decoding without a graphics card adds delay; try the sub-stream on the same PC.",
+                    }));
+        }
     }
 
     private static void Address(HealthSnapshot s, List<Finding> f)

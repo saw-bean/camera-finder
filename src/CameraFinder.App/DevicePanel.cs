@@ -20,6 +20,16 @@ internal sealed class DeviceTools
     public Credentials? DemoLogin { get; init; }
     public required Func<bool> SafeMode { get; init; }
     public required Action<string> Log { get; init; }
+
+    /// <summary>Managed switches of this site (found once per scan over SNMP).</summary>
+    public required SwitchDirectory Switches { get; init; }
+    /// <summary>Addresses to ask whether they are a switch: every device found by the scan.</summary>
+    public required Func<IEnumerable<IPAddress>> SwitchCandidates { get; init; }
+    /// <summary>Laptop address to ask a device from, or null when it is not reachable without adding an address.</summary>
+    public required Func<IPAddress, IPAddress?> SourceFor { get; init; }
+    /// <summary>SNMP read communities to try, the saved one first.</summary>
+    public required Func<IReadOnlyList<string>> Communities { get; init; }
+    public Action<string>? SaveCommunity { get; init; }
 }
 
 /// <summary>
@@ -58,7 +68,22 @@ internal sealed class DevicePanel : Panel
     private readonly TextBox _password = new() { Width = 110, PlaceholderText = "password", UseSystemPasswordChar = true, Margin = new Padding(3, 4, 3, 3) };
     private readonly FluentButton _useLogin = new() { Text = "Use", Primary = true, MinimumSize = new Size(60, 32) };
 
-    private readonly Label _bwTitle = new() { Text = "Live bandwidth", AutoSize = true, Margin = new Padding(0, 4, 8, 0) };
+    private readonly Label _pathTitle = Heading("Path (trace)");
+    private readonly Label _path = new() { AutoSize = true, MaximumSize = new Size(400, 0), Margin = new Padding(0, 0, 0, 4) };
+    private readonly Label _portTitle = Heading("Switch port bandwidth (SNMP)");
+    private readonly Label _port = new() { AutoSize = true, MaximumSize = new Size(400, 0), Tag = "secondary", Margin = new Padding(0, 0, 0, 2) };
+    private readonly Label _portKbps = new() { AutoSize = true, Text = "", Margin = new Padding(0, 0, 0, 0) };
+    private readonly Sparkline _portGraph = new() { Height = 56, Margin = new Padding(0, 2, 0, 4), Visible = false };
+    private readonly FlowLayoutPanel _snmpRow = new() { AutoSize = true, WrapContents = true, Visible = false, FlowDirection = FlowDirection.TopDown, Margin = new Padding(0, 0, 0, 4) };
+    private readonly Label _snmpNote = new() { AutoSize = true, MaximumSize = new Size(380, 0), Margin = new Padding(0, 2, 0, 2) };
+    private readonly TextBox _community = new() { Width = 160, PlaceholderText = "SNMP community", Margin = new Padding(0, 4, 3, 3) };
+    private readonly FluentButton _useCommunity = new() { Text = "Use", Primary = true, MinimumSize = new Size(60, 32) };
+    private readonly Label _videoTitle = Heading("Video check (ffmpeg)");
+    private readonly Label _delayTitle = Heading("Live view delay");
+    private readonly Label _delay = new() { AutoSize = true, MaximumSize = new Size(400, 0), Margin = new Padding(0, 0, 0, 4) };
+    private readonly FluentButton _flash = new() { Text = "Measure camera delay (flash test)…", MinimumSize = new Size(120, 32), Enabled = false };
+    private readonly Label _diagTitle = Heading("Diagnosis");
+    private readonly Label _bwTitle = new() { Text = "Video stream bandwidth (RTSP)", AutoSize = true, Margin = new Padding(0, 10, 8, 2) };
     private readonly ComboBox _streams = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200, Margin = new Padding(0, 0, 0, 0) };
     private readonly Label _kbps = new() { AutoSize = true, Text = "-", Margin = new Padding(0, 4, 0, 0) };
     private readonly Label _bwDetails = new() { AutoSize = true, MaximumSize = new Size(400, 0), Tag = "secondary", Margin = new Padding(0, 0, 0, 4) };
@@ -74,7 +99,12 @@ internal sealed class DevicePanel : Panel
     private readonly FluentButton _showRaw = new() { Text = "Data", MinimumSize = new Size(56, 28) };
     private readonly TextBox _output = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, WordWrap = true };
 
+    private static Label Heading(string text) => new() { Text = text, AutoSize = true, Margin = new Padding(0, 10, 0, 2) };
+
     private DeviceTools? _tools;
+    private CancellationTokenSource? _portCts;
+    private SwitchPortReport? _portReport;
+    private readonly List<LiveSample> _portHistory = new();
     private Device? _device;
     private CancellationTokenSource? _cts;      // the whole check for the current device
     private CancellationTokenSource? _liveCts;  // just the live bandwidth (restarted when another stream is picked)
@@ -94,7 +124,7 @@ internal sealed class DevicePanel : Panel
         Dock = DockStyle.Fill;
         // On a small screen the panel scrolls instead of squeezing the diagnosis out of sight.
         AutoScroll = true;
-        AutoScrollMinSize = new Size(0, 720);
+        AutoScrollMinSize = new Size(0, 1280);
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(14, 10, 14, 10) };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
@@ -106,10 +136,20 @@ internal sealed class DevicePanel : Panel
         _loginRow.FlowDirection = FlowDirection.TopDown;
         _loginRow.Controls.AddRange(new Control[] { _loginNote, loginFields });
         var bwHeader = Flow(_bwTitle, _streams);
+        _snmpRow.Controls.AddRange(new Control[] { _snmpNote, Flow(_community, _useCommunity) });
         _urlRow.Controls.AddRange(new Control[] { _urlNote, Flow(_url, _useUrl) });
         var views = Flow(_showDiagnosis, _showEvents, _showRaw);
 
-        var rows = new Control[] { titleRow, _subtitle, _state, buttons, _reachRow, _loginRow, bwHeader, _kbps, _bwDetails, _urlRow, _graph, _video, views, _output };
+        var rows = new Control[]
+        {
+            titleRow, _subtitle, _state, buttons, _reachRow, _loginRow,
+            _pathTitle, _path,
+            _portTitle, _portKbps, _port, _snmpRow, _portGraph,
+            bwHeader, _kbps, _bwDetails, _urlRow, _graph,
+            _videoTitle, _video,
+            _delayTitle, _delay, _flash,
+            _diagTitle, views, _output,
+        };
         layout.RowCount = rows.Length;
         for (int i = 0; i < rows.Length; i++)
         {
@@ -119,6 +159,9 @@ internal sealed class DevicePanel : Panel
         }
         _graph.Dock = DockStyle.Fill;
         _graph.MinimumSize = new Size(100, 70);
+        _portGraph.Dock = DockStyle.Fill;
+        _portGraph.MinimumSize = new Size(100, 56);
+        _output.MinimumSize = new Size(100, 240);
         Controls.Add(layout);
 
         var tips = new ToolTip { AutoPopDelay = 15000 };
@@ -154,6 +197,16 @@ internal sealed class DevicePanel : Panel
             CustomUrls[_device.Ip.ToString()] = u;
             Start();
         };
+        _flash.Click += (_, _) => RunFlashTest();
+        _useCommunity.Click += (_, _) =>
+        {
+            string c = _community.Text.Trim();
+            if (c.Length == 0 || _tools == null) return;
+            _tools.SaveCommunity?.Invoke(c);
+            _tools.Switches.Reset();
+            Start();
+        };
+        _community.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; _useCommunity.PerformClick(); } };
         _url.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; _useUrl.PerformClick(); } };
         _password.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; _useLogin.PerformClick(); } };
         _streams.SelectedIndexChanged += (_, _) => { if (!_fillingStreams) StartLive(); };
@@ -177,7 +230,10 @@ internal sealed class DevicePanel : Panel
     public void ApplyTheme()
     {
         _title.Font = Theme.Subtitle;
-        _bwTitle.Font = Theme.BodyStrong;
+        foreach (var h in new[] { _bwTitle, _pathTitle, _portTitle, _videoTitle, _delayTitle, _diagTitle }) h.Font = Theme.BodyStrong;
+        _portKbps.Font = new Font(Theme.Subtitle.FontFamily, 14F, FontStyle.Bold);
+        _portGraph.BackColor = Theme.Card;
+        _path.Font = Theme.Body;
         _kbps.Font = new Font(Theme.Subtitle.FontFamily, 20F, FontStyle.Bold);
         _output.Font = Theme.Body;
         _output.ForeColor = Theme.Text;
@@ -206,6 +262,7 @@ internal sealed class DevicePanel : Panel
         _url.Text = "";
         _result = null;
         _snapshot = null;
+        _flashResult = null;
         _reach = null;
         _login = null;
         if (d == null) { Clear(); return; }
@@ -230,6 +287,8 @@ internal sealed class DevicePanel : Panel
         _cts?.Cancel();
         _cts = null;
         StopLive();
+        _portCts?.Cancel();
+        _portCts = null;
     }
 
     public void RefreshInfo()
@@ -260,9 +319,19 @@ internal sealed class DevicePanel : Panel
         _reachRow.Visible = false;
         _loginRow.Visible = false;
         _urlRow.Visible = false;
+        _snmpRow.Visible = false;
+        _path.Text = _device == null ? "" : "Tracing…";
+        _port.Text = _device == null ? "" : "Looking for the switch port…";
+        _portKbps.Text = "";
+        _portGraph.Visible = false;
+        _portGraph.Data = Array.Empty<LiveSample>();
+        lock (_portHistory) _portHistory.Clear();
+        _portReport = null;
         _kbps.Text = "-";
         _bwDetails.Text = "";
         _video.Text = "";
+        _delay.Text = _device == null ? "" : "Measured from the live stream once it plays.";
+        _flash.Enabled = false;
         _graph.Data = Array.Empty<LiveSample>();
         _fillingStreams = true;
         _streams.Items.Clear();
@@ -280,10 +349,12 @@ internal sealed class DevicePanel : Panel
         _debounce.Stop();
         _cts?.Cancel();
         StopLive();
+        _portCts?.Cancel();
         _cts = new CancellationTokenSource();
         var ct = _cts.Token;
         ResetSections();
         _ = RunAsync(d, tools, joinAllowed, loginOverride, ct);
+        _ = RunPortAsync(d, tools, ct);
     }
 
     private async Task RunAsync(Device d, DeviceTools tools, bool joinAllowed, Credentials? loginOverride, CancellationToken ct)
@@ -322,13 +393,16 @@ internal sealed class DevicePanel : Panel
             if (ct.IsCancellationRequested) return;
             _snapshot = result.Snapshot;
             _snapshot.NotChecked.RemoveAll(n => n.StartsWith("Video stream not checked"));
+            _snapshot.Port = _portReport;
+            ShowPath(_snapshot.Path);
             UpdateLogin(d, tools, _snapshot.Onvif);
             ShowResult(HealthCheck.Analyse(_snapshot));
 
             if (!camera)
             {
                 _kbps.Text = "-";
-                AskUrl("Not a camera, so there is no video to measure. If it does stream video (an encoder, a phone app), enter its stream address:");
+                _video.Text = "Not a camera.";
+                AskUrl("Not a camera, so there is no video stream to measure (its total traffic is under Switch port). If it does stream video (an encoder, a phone app), enter its stream address:");
                 return;
             }
 
@@ -348,6 +422,86 @@ internal sealed class DevicePanel : Panel
             if (!ct.IsCancellationRequested) { SetState("The check failed: " + ex.Message, Red); }
         }
     }
+
+    // ------------------------------------------------------------------ path and switch port
+
+    private void ShowPath(TraceReport? t)
+    {
+        if (t == null) { _path.Text = "Not traced."; return; }
+        var lines = new List<string> { PathTracer.Summary(t) };
+        if (t.Hops.Count > 1 || !t.ReachedTarget)
+            lines.AddRange(t.Hops.Select(h =>
+                $"  {h.Ttl}.  {h.Address?.ToString() ?? "(no reply)",-15}  {(h.Received == 0 ? "-" : $"{h.AvgMs:0} ms")}  {h.LossPercent:0.#}% loss"));
+        _path.Text = string.Join(Environment.NewLine, lines);
+    }
+
+    /// <summary>
+    /// Finds the device's switch port over SNMP (asking the site's devices once per scan which of them are managed
+    /// switches) and watches its traffic every 2 s - for any device, not just cameras.
+    /// </summary>
+    private async Task RunPortAsync(Device d, DeviceTools tools, CancellationToken ct)
+    {
+        try
+        {
+            if (d.Mac == null) { _port.Text = "The device's MAC address is not known, so its switch port cannot be found."; return; }
+            if (!tools.Switches.Discovered) _port.Text = "Asking the site's devices which are managed switches (SNMP)…";
+            await tools.Switches.DiscoverAsync(tools.SwitchCandidates(), tools.Communities(), tools.SourceFor, CancellationToken.None);
+            if (ct.IsCancellationRequested) return;
+            if (tools.Switches.Switches.Count == 0)
+            {
+                _port.Text = "No managed switch answered SNMP, so per-port bandwidth is not available.";
+                _snmpNote.Text = $"Tried community \"{string.Join("\", \"", tools.Communities())}\". If the switch has SNMP on with another read community, enter it (it is saved):";
+                _snmpRow.Visible = true;
+                return;
+            }
+            var port = await Task.Run(() => tools.Switches.LocateAsync(d.Mac, ct), ct);
+            if (ct.IsCancellationRequested) return;
+            if (port == null)
+            {
+                _port.Text = $"None of the managed switches ({string.Join(", ", tools.Switches.Switches.Select(s => s.Name ?? s.Ip.ToString()))}) has learned this device's MAC. It may be behind an unmanaged switch, or idle.";
+                return;
+            }
+            _portReport = port;
+            if (_snapshot != null) _snapshot.Port = port;
+            _port.Text = PortLine(port);
+            _portGraph.Visible = true;
+
+            _portCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var pct = _portCts.Token;
+            int samples = 0;
+            _ = Task.Run(() => tools.Switches.MonitorAsync(port, TimeSpan.FromSeconds(2), s => Post(() =>
+            {
+                if (pct.IsCancellationRequested) return;
+                List<LiveSample> hist;
+                lock (_portHistory)
+                {
+                    _portHistory.Add(new LiveSample(s.Time, s.FromDeviceKbps, 0, s.NewErrors > 0, 0));
+                    if (_portHistory.Count > 60) _portHistory.RemoveAt(0);
+                    hist = _portHistory.ToList();
+                }
+                _portGraph.Data = hist;
+                _portKbps.Text = $"↑ {LogNormalizer.Mbps(s.FromDeviceKbps)} from device   ↓ {LogNormalizer.Mbps(s.ToDeviceKbps)} to device";
+                _port.Text = PortLine(port);
+                // Errors only mean something once watched for a while: update the diagnosis after ~10 s, then every minute.
+                if (_snapshot != null && (++samples == 5 || samples % 30 == 0))
+                {
+                    _snapshot.Port = port;
+                    ShowResult(HealthCheck.Analyse(_snapshot));
+                }
+            }), pct), pct);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { if (!ct.IsCancellationRequested) _port.Text = "Switch port: " + ex.Message; }
+    }
+
+    private static string PortLine(SwitchPortReport p) =>
+        p.Describe() +
+        (p.SpeedMbps is { } sp ? $" · {(sp >= 1000 ? $"{sp / 1000.0:0.#} Gbit/s" : $"{sp} Mbit/s")}" : "") +
+        (p.Duplex != null ? $" {p.Duplex} duplex" : "") +
+        (p.Up == false ? " · LINK DOWN" : "") +
+        (p.ErrorsDuringCheck is > 0 ? $" · {p.ErrorsDuringCheck} CRC errors while watched" : "") +
+        (p.MacsOnPort > 3 ? $" · shared by {p.MacsOnPort} devices (traffic includes theirs)" : "") +
+        "\nWhat the device sends (↑) and receives (↓) on the wire, all traffic, read from the switch every 2 s.";
 
     private async Task RunFfprobeAsync(IStreamProber ffprobe, string url, CancellationToken ct)
     {
@@ -440,11 +594,24 @@ internal sealed class DevicePanel : Panel
                         (configured is { } c ? $" · set to max {LogNormalizer.Mbps(c)}" : "") +
                         (stats.LossPercent >= 0.5 ? $" · {stats.LossPercent:0.#}% packets missing" : "") +
                         $"\nMeasured over the last {Math.Min(stats.Seconds, LiveStats.HistorySeconds)} s. This is one viewer's copy; the NVR pulls its own.";
+                    // Live view delay: refresh the numbers every few seconds.
+                    if (main && stats.Seconds % 3 == 0)
+                    {
+                        var delay = stats.Delay.Report();
+                        if (_snapshot != null) delay.CameraDelay ??= _snapshot.Delay?.CameraDelay;
+                        _delay.Text = string.Join(Environment.NewLine, DiagnosisWriter.DelayLines(MergeFlash(delay)));
+                        _flash.Enabled = true;
+                    }
                     // Without ffprobe (or from a temporary IP), the live measurement is the video check.
                     if (main && stats.Seconds == 10 && _snapshot != null && (_snapshot.Stream == null || _streamFromLive))
                     {
                         _snapshot.Stream = stats.ToReport(FfprobeStreamProber.Redact(url), nominalFps);
                         _streamFromLive = true;
+                    }
+                    // Update the diagnosis with the delay numbers after 10 s and once it can tell whether delay builds up.
+                    if (main && stats.Seconds is 10 or 45 && _snapshot != null)
+                    {
+                        _snapshot.Delay = MergeFlash(stats.Delay.Report());
                         ShowResult(HealthCheck.Analyse(_snapshot));
                     }
                 }), ct);
@@ -475,6 +642,34 @@ internal sealed class DevicePanel : Panel
                 Post(() => { if (!ct.IsCancellationRequested) { _kbps.Text = "-"; _bwDetails.Text = "Live bandwidth: " + ex.Message; } });
             }
         }, ct);
+    }
+
+    // ------------------------------------------------------------------ live view delay
+
+    private DelayReport? _flashResult;
+
+    /// <summary>Keep the flash test's result when the live numbers are refreshed.</summary>
+    private DelayReport MergeFlash(DelayReport r)
+    {
+        if (_flashResult is { } f && r.CameraDelay == null && r.FlashesShown == 0)
+        {
+            r.CameraDelay = f.CameraDelay; r.CameraDelayMin = f.CameraDelayMin; r.CameraDelayMax = f.CameraDelayMax;
+            r.FlashesSeen = f.FlashesSeen; r.FlashesShown = f.FlashesShown;
+        }
+        return r;
+    }
+
+    private void RunFlashTest()
+    {
+        if (_live is not { } stats || _snapshot == null) return;
+        using var w = new FlashTestWindow(stats.Delay);
+        w.ShowDialog(FindForm());
+        if (w.Result is not { } r) return;
+        _flashResult = r;
+        _snapshot.Delay = MergeFlash(stats.Delay.Report());
+        _delay.Text = string.Join(Environment.NewLine, DiagnosisWriter.DelayLines(_snapshot.Delay));
+        ShowResult(HealthCheck.Analyse(_snapshot));
+        ShowView(0);
     }
 
     // ------------------------------------------------------------------ logins

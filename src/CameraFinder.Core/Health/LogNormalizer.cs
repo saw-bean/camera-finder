@@ -209,6 +209,19 @@ public static class LogNormalizer
                     (v.LongestGap is { } g && g > 0.5 ? $", longest pause {g:0.#} s" : ""));
         }
 
+        if (s.Port is { } port)
+        {
+            yield return M("Switch", Severity.Info,
+                $"Plugged into {port.Describe()}" +
+                (port.SpeedMbps is { } sp ? $", link {(sp >= 1000 ? $"{sp / 1000.0:0.#} Gbit/s" : $"{sp} Mbit/s")}" : "") +
+                (port.Duplex != null ? $" {port.Duplex} duplex" : "") +
+                (port.MacsOnPort > 1 ? $", {port.MacsOnPort} devices learned on that port" : ""));
+            if (port.FromDeviceKbps is { } from && port.ToDeviceKbps is { } to)
+                yield return M("Switch", Severity.Info, $"The port carries {Mbps(from)} from the device and {Mbps(to)} to it");
+            if (port.ErrorsDuringCheck is > 0 and var e)
+                yield return M("Switch", Severity.Warning, $"The switch counted {e} damaged frames (CRC errors) from the device while it was watched");
+        }
+
         foreach (var n in s.NotChecked)
             yield return M("Check", Severity.Info, n);
     }

@@ -27,7 +27,7 @@ public sealed class MainForm : Form
 
     private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, BackColor = SystemColors.Window };
     private readonly DevicePanel _panel = new();
-    private readonly FluentButton _speed = Btn("Speed test…");
+    private readonly FluentButton _speed = Btn("Speed test (iperf3)…");
     private readonly CredentialStore _logins = new();
     private readonly FluentButton _export = Btn("Export CSV…");
     private readonly FluentButton _removeIps = Btn("Remove temporary IPs");
@@ -53,6 +53,7 @@ public sealed class MainForm : Form
     private Task? _scanUi;        // the whole ScanAsync, including its clean-up
     private Task? _scanEngineTask; // the engine itself (runs off the UI thread)
     private Device? _foundTarget;
+    private Func<Adapter?>? _adapterNow; // the scan adapter as it is now (real network)
 
     /// <summary>Set by --screenshot: run the demo and save screenshots there, then exit.</summary>
     public string? ScreenshotFolder { get; init; }
@@ -245,6 +246,13 @@ public sealed class MainForm : Form
             if (_engine?.Devices.FirstOrDefault(d => d.Ip.ToString() == "192.168.1.108") is { } dahua) SelectRow(dahua);
             await Task.Delay(15000);
             Snap(this, Path.Combine(folder, $"{theme}-6-restart-loop.png"));
+            using (var flash = new FlashTestWindow(new DelayTracker()))
+            {
+                flash.Show(this);
+                await Task.Delay(800);
+                Snap(flash, Path.Combine(folder, $"{theme}-8-flash-test.png"));
+                flash.Close();
+            }
             await TraceSelectedAsync();
             await Task.Delay(4000);
             if (OwnedForms.LastOrDefault() is { } trace) { Snap(trace, Path.Combine(folder, $"{theme}-7-trace.png")); trace.Close(); }
@@ -397,6 +405,7 @@ public sealed class MainForm : Form
             _demoSite = null;
             _engine = new ScanEngine(new WindowsArpResolver(), _temp);
             string adapterId = adapter.Id;
+            _adapterNow = () => Adapter.List().FirstOrDefault(a => a.Id == adapterId);
             _web = new WebPageAccess(OperatingSystem.IsWindows() ? _temp : null,
                 () => Adapter.List().FirstOrDefault(a => a.Id == adapterId),
                 async (d, ct) => { using var enricher = new DeviceEnricher(); await enricher.EnrichAsync(d, null, ct); });
@@ -492,6 +501,16 @@ public sealed class MainForm : Form
     /// <summary>How the device panel reaches and checks devices during this scan: the real network, or the demo site.</summary>
     private DeviceTools CreateDeviceTools()
     {
+        const string CommunityKey = "snmp:community";
+        IReadOnlyList<string> Communities()
+        {
+            var saved = _demoSite == null ? _logins.Get(CommunityKey)?.Password : null;
+            return saved != null && saved != "public" ? new[] { saved, "public" } : new[] { "public" };
+        }
+        IEnumerable<IPAddress> Candidates() => _engine?.Devices.Select(x => x.Ip).ToList() ?? new List<IPAddress>();
+        Func<Adapter?> adapterNow = _demoSite is { } ds ? () => ds.Laptop : () => _adapterNow?.Invoke();
+        IPAddress? SourceFor(IPAddress ip) => adapterNow() is { } a ? CameraFinder.Core.Net.Reach.SourceFor(a.Addresses, ip) : null;
+
         async Task<WebPageResult> Reach(Device d, bool mayJoin)
         {
             if (_web == null || _engine == null) return new WebPageResult(WebPageStatus.JoinFailed);
@@ -505,6 +524,7 @@ public sealed class MainForm : Form
             {
                 Reach = Reach, IsTemporary = _ => false, Health = () => new HealthCheck(demo, demo, demo, demo), Live = demo,
                 DemoLogin = new Credentials("admin", "demo"), SafeMode = () => _safeMode.Checked, Log = AppendLog,
+                Switches = new SwitchDirectory(new DemoSwitch()), SwitchCandidates = Candidates, SourceFor = SourceFor, Communities = Communities,
             };
         }
         return new DeviceTools
@@ -516,6 +536,11 @@ public sealed class MainForm : Form
             Store = _logins,
             SafeMode = () => _safeMode.Checked,
             Log = AppendLog,
+            Switches = new SwitchDirectory(new SnmpClient()),
+            SwitchCandidates = Candidates,
+            SourceFor = SourceFor,
+            Communities = Communities,
+            SaveCommunity = c => _logins.Save(CommunityKey, new Credentials("snmp", c)),
         };
     }
 
