@@ -57,7 +57,10 @@ public sealed class OnvifReport
     /// <summary>The camera's system log, as returned (null when the camera does not offer it).</summary>
     public string? SystemLog { get; set; }
     public List<OnvifProfile> Profiles { get; } = new();
+    /// <summary>RTSP address of the first (main) profile.</summary>
     public string? StreamUri { get; set; }
+    /// <summary>RTSP address per profile token (main, sub, third stream...).</summary>
+    public Dictionary<string, string> StreamUris { get; } = new();
 
     /// <summary>Requests the camera did not support or refused, in plain words.</summary>
     public List<string> Unsupported { get; } = new();

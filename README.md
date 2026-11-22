@@ -73,9 +73,13 @@ Avigilon, Uniview, Hanwha's newer models and most others are found through ONVIF
 
 ## Camera health tools
 
-**Health check** (select a camera, press *Health check*) works out what is wrong with a camera and says so in plain words. It runs in four steps:
+**Select a device and everything runs by itself.** The panel on the right fills in automatically: who the device is, its health diagnosis, the **live bandwidth** its video stream uses, the ffmpeg stream check, and buttons for its web page, Ping, Trace and Copy IP. Selecting another device stops the checks on the previous one. During a scan the checks wait until the scan finishes. Outside safe mode a temporary IP is added automatically for devices in other ranges (in safe mode the panel offers a button instead).
 
-1. **Collect** — 20 pings, an mtr-style path trace, ONVIF (model and firmware, the camera's clock, its **system log**, video profiles and stream address) and 8 seconds of the live video stream (with the bundled ffprobe).
+**Live bandwidth** plays the camera's stream with Camera Finder's own RTSP client (RTP over TCP) and shows, every second, the Mbit/s on the wire, frames per second, key-frame spacing, peak and average, and any packets the camera skipped, with a two-minute graph and the bitrate limit configured in the camera as a dashed line. Pick the main or sub stream when the camera has several. It measures one viewer's copy of the stream; the NVR pulls its own copy, so a camera's total load is this times the number of viewers.
+
+**Health check** works out what is wrong with a camera and says so in plain words. It runs in four steps:
+
+1. **Collect** — 20 pings, an mtr-style path trace, ONVIF (model and firmware, the camera's clock, its **system log**, video profiles and stream addresses) and the live stream (ffprobe for codec, resolution and frame timing; the live bandwidth monitor for everything else).
 2. **Normalize** — every measurement and every line of the camera's own log is rewritten as one plain sentence. Brands word things differently ("Illegal login", "authentication failure", "Login failed"); they all become *"A login was refused (wrong user name or password) from 192.168.1.10"*.
 3. **Detect** — known failure patterns are matched across the events, for example:
    | Pattern | What it usually means |
@@ -92,7 +96,7 @@ Avigilon, Uniview, Hanwha's newer models and most others are found through ONVIF
    | IP conflict, SD card errors, video loss, overheating, tampering | As named, from the camera's log |
 4. **Explain** — a short diagnosis: the most likely problem first, the evidence, what to try first, then what looked fine and the camera's recent events. *Events* shows the full plain-language timeline and *Collected data* the raw values and log.
 
-The camera's user name and password are needed for the log and video. Tick *Remember* to save the login for that camera, encrypted for your Windows user (DPAPI, `%LOCALAPPDATA%\CameraFinder\logins.dat`); the last login used is offered for the next camera. A camera in another IP range is reached through a temporary IP like *Ping*; its video can only be checked when the laptop has an address of its own in that range (ffprobe always connects from the main address).
+The camera's user name and password are needed for the log and video. The panel tries the login saved for that camera, else the last login that worked (a site usually shares one). A login that works is saved automatically, encrypted for your Windows user (DPAPI, `%LOCALAPPDATA%\CameraFinder\logins.dat`). A login the camera **refuses is never retried automatically** — the panel asks for the right one — so clicking through cameras cannot lock their accounts. For a camera reached through a temporary IP, ffprobe cannot connect (it always uses the laptop's main address), so the video check comes from the live bandwidth monitor instead, which can.
 
 **Trace** is mtr for Windows: every router on the way to the device, probed every second, with loss, last/average/best/worst delay and jitter per hop, and a sentence saying where loss starts. On a flat camera network it shows one hop — the device itself.
 

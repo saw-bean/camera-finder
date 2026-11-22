@@ -289,6 +289,7 @@ static partial class Tests
         Assert.True(report.SystemLog?.Contains("Illegal login") == true, "system log: " + report.SystemLog);
         Assert.Equal(2, report.Profiles.Count);
         Assert.Equal("rtsp://1.2.3.4:554/main", report.StreamUri);
+        Assert.Equal(2, report.StreamUris.Count); // main and sub profile
         lock (seen)
         {
             Assert.True(seen.Count >= 6, "requests: " + seen.Count);

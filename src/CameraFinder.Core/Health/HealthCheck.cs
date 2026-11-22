@@ -45,6 +45,18 @@ public sealed class HealthCheck
         _streamMissingReason = streamMissingReason;
     }
 
+    /// <summary>ffprobe, when it is available (null otherwise; <see cref="StreamMissingReason"/> says why).</summary>
+    public IStreamProber? StreamProber => _stream;
+    public string? StreamMissingReason => _streamMissingReason;
+
+    /// <summary>The address to pull video from: what ONVIF reported, else the brand's usual path; re-pointed at the IP we reached.</summary>
+    public static string? StreamUrl(HealthSnapshot s, string? profileToken = null)
+    {
+        string? url = (profileToken != null ? s.Onvif?.StreamUris.GetValueOrDefault(profileToken) : null)
+                      ?? s.Onvif?.StreamUri ?? RtspPaths.Guess(s.Ip.ToString(), s.Vendor, s.Description ?? s.Onvif?.Model);
+        return url == null ? null : Repoint(url, s.Ip);
+    }
+
     /// <summary>The usual set-up: real ICMP and ONVIF, ffprobe from the tools folder if it is there.</summary>
     public static HealthCheck CreateDefault()
     {
@@ -87,7 +99,7 @@ public sealed class HealthCheck
         else if (_stream == null) snap.NotChecked.Add(_streamMissingReason ?? "Video stream not checked.");
         else
         {
-            string? url = snap.Onvif?.StreamUri ?? RtspPaths.Guess(device.Ip.ToString(), snap.Vendor, snap.Description ?? snap.Onvif?.Model);
+            string? url = StreamUrl(snap);
             if (url == null)
                 snap.NotChecked.Add("Video stream not checked: the camera did not report its stream address over ONVIF and its brand is not known.");
             else if (options.SourceIsTemporary)
@@ -95,7 +107,7 @@ public sealed class HealthCheck
             else
             {
                 progress?.Report($"Watching the video stream for {options.StreamWatch.TotalSeconds:0} seconds…");
-                try { snap.Stream = await _stream.ProbeAsync(Repoint(url, device.Ip), options.Login, options.StreamWatch, ct); }
+                try { snap.Stream = await _stream.ProbeAsync(url, options.Login, options.StreamWatch, ct); }
                 catch (Exception ex) when (ex is not OperationCanceledException) { snap.NotChecked.Add("Video stream not checked: " + ex.Message); }
             }
         }
