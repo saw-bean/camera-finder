@@ -78,7 +78,7 @@ public sealed class MainForm : Form
             LoadAdapters();
             ShowNpcapStatus();
             AppendLog("Plug into the camera / door network, pick the adapter and press Scan.");
-            _ = CheckForUpdateAsync();
+            if (ScreenshotFolder == null) _ = CheckForUpdateAsync(); // never update the copy CI is testing
             if (ScreenshotFolder != null) _ = TakeScreenshotsAsync(ScreenshotFolder);
         };
     }
@@ -302,55 +302,55 @@ public sealed class MainForm : Form
         _export.Click += (_, _) => Export();
         _removeIps.Click += (_, _) => RemoveTemporaryAddresses();
         _npcap.Click += (_, _) => { if (_npcap.IsLink) OpenUrl(PassiveListener.NpcapDownloadUrl); };
-        _update.Click += async (_, _) => await InstallUpdateAsync();
+        _update.Click += (_, _) => InstallUpdateNow();
         FormClosing += OnClosing;
     }
 
     // ------------------------------------------------------------------ updates
 
+    /// <summary>Installer of a newer version, downloaded and checked in the background; installed silently when the app closes.</summary>
+    private string? _downloadedUpdate;
+    private bool _relaunchAfterUpdate;
+
+    /// <summary>
+    /// Automatic updates: if GitHub has a newer release, download it quietly in the background (SHA-256 checked) and
+    /// install it silently when Camera Finder is closed, so the next start is the new version. Nothing interrupts the
+    /// technician; clicking the status bar note installs it right away and restarts the app.
+    /// </summary>
     private async Task CheckForUpdateAsync()
     {
         _available = await UpdateChecker.CheckAsync(CancellationToken.None);
-        if (_available is null || IsDisposed) return;
-        _update.Text = $"Update available: {_available.Version.ToString(3)} - click to install";
+        if (_available is not { } update || IsDisposed) return;
+        string v = update.Version.ToString(3);
+        try
+        {
+            _downloadedUpdate = await Task.Run(() => UpdateChecker.DownloadAsync(update, new Progress<int>(), CancellationToken.None));
+        }
+        catch (Exception ex)
+        {
+            // Offline or interrupted: try again next start. Keep a manual route.
+            AppendLog($"Version {v} is available but could not be downloaded ({ex.Message}). It will be tried again next start.");
+            if (IsDisposed) return;
+            _update.Text = $"Update {v} available - open download page";
+            _update.Visible = true;
+            return;
+        }
+        if (IsDisposed) return;
+        _update.Text = $"Update {v} installs when you close Camera Finder - click to install now";
         _update.Visible = true;
-        AppendLog($"A newer version ({_available.Version.ToString(3)}) is available. Click the link in the status bar to install it.");
+        AppendLog($"Version {v} has been downloaded. It installs automatically when you close Camera Finder.");
     }
 
-    private async Task InstallUpdateAsync()
+    private void InstallUpdateNow()
     {
-        if (_available is not { } update) return;
+        if (_downloadedUpdate == null) { OpenUrl(UpdateChecker.ReleasesPage); return; }
         if (_stop.Enabled)
         {
             MessageBox.Show(this, "Stop the scan first, then install the update.", "Camera Finder", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        if (MessageBox.Show(this,
-                $"Download and install Camera Finder {update.Version.ToString(3)}?\n\n" +
-                "Camera Finder will close (temporary IPs are removed) and the installer will start.",
-                "Update", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
-            return;
-
-        _update.Enabled = false;
-        _scan.Enabled = false;
-        _status.Text = "Downloading update…";
-        try
-        {
-            var path = await UpdateChecker.DownloadAsync(update, new Progress<int>(p => _progress.Value = Math.Clamp(p, 0, 100)), CancellationToken.None);
-            UpdateChecker.StartInstaller(path);
-            Close();
-        }
-        catch (Exception ex)
-        {
-            AppendLog("Update download failed: " + ex.Message);
-            _status.Text = "Update failed";
-            _progress.Value = 0;
-            _update.Enabled = true;
-            _scan.Enabled = true;
-            if (MessageBox.Show(this, "The update could not be downloaded. Open the download page instead?", "Update",
-                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
-                OpenUrl(UpdateChecker.ReleasesPage);
-        }
+        _relaunchAfterUpdate = true;
+        Close(); // OnClosing removes the temporary IPs, then starts the installer
     }
 
     // ------------------------------------------------------------------ actions
@@ -762,6 +762,13 @@ public sealed class MainForm : Form
             _status.Text = "Removing temporary IPs…";
             Refresh();
             _temp.RemoveAll();
+        }
+        _panel.Stop();
+        if (_downloadedUpdate != null && File.Exists(_downloadedUpdate))
+        {
+            // The installer waits for this process to exit before replacing its files.
+            try { UpdateChecker.StartSilentInstall(_downloadedUpdate, _relaunchAfterUpdate); }
+            catch (Exception) { /* e.g. blocked by antivirus: the update is tried again next start */ }
         }
     }
 

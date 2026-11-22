@@ -54,6 +54,8 @@ Name: "{group}\Uninstall Camera Finder"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\Camera Finder"; Filename: "{app}\CameraFinder.exe"; Tasks: desktopicon
 
 [Run]
+; Automatic update "install now": Camera Finder starts the installer with /VERYSILENT /RELAUNCH=1 and closes itself.
+Filename: "{app}\CameraFinder.exe"; Flags: nowait; Check: RelaunchRequested
 ; The speed test server must accept connections from the other laptop. Replace any old rule, then allow iperf3 itself
 ; (only that program, only while it runs) on private and domain networks.
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Camera Finder speed test (iperf3)"""; Flags: runhidden; StatusMsg: "Allowing the speed test through Windows Firewall..."
@@ -71,6 +73,26 @@ var
   DownloadPage: TDownloadWizardPage;
   NpcapDownloaded: Boolean;
   NpcapFailed: Boolean;
+
+function RelaunchRequested(): Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;
+
+// An automatic update starts this installer and then closes Camera Finder. Wait (up to 60 s) for it to exit, so its
+// files are not in use. Same mutex as the app's single-instance check.
+function InitializeSetup(): Boolean;
+var
+  Waited: Integer;
+begin
+  Waited := 0;
+  while CheckForMutexes('Global\CameraFinder.SingleInstance') and (Waited < 120) do
+  begin
+    Sleep(500);
+    Waited := Waited + 1;
+  end;
+  Result := True;
+end;
 
 function NpcapInstalled(): Boolean;
 begin
@@ -90,7 +112,7 @@ end;
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
-  if (CurPageID = wpReady) and WizardIsTaskSelected('npcap') and (not NpcapInstalled()) then
+  if (CurPageID = wpReady) and (not WizardSilent()) and WizardIsTaskSelected('npcap') and (not NpcapInstalled()) then
   begin
     DownloadPage.Clear;
     DownloadPage.Add('https://npcap.com/dist/npcap-{#NpcapVersion}.exe', 'npcap-setup.exe', '{#NpcapSha256}');
