@@ -43,7 +43,7 @@ internal sealed class DevicePanel : Panel
     private readonly FluentButton _ping = new() { Text = "Ping", MinimumSize = new Size(60, 32) };
     private readonly FluentButton _trace = new() { Text = "Trace", MinimumSize = new Size(60, 32) };
     private readonly FluentButton _copy = new() { Text = "Copy IP", MinimumSize = new Size(70, 32) };
-    private readonly FluentButton _again = new() { Text = "Check again", MinimumSize = new Size(90, 32) };
+    private readonly FluentButton _again = new() { Text = "↻", MinimumSize = new Size(36, 32) };
 
     private readonly FlowLayoutPanel _reachRow = new() { AutoSize = true, WrapContents = true, Visible = false, Margin = new Padding(0, 0, 0, 6) };
     private readonly Label _reachNote = new() { AutoSize = true, MaximumSize = new Size(380, 0), Margin = new Padding(0, 8, 6, 0) };
@@ -85,6 +85,9 @@ internal sealed class DevicePanel : Panel
     public DevicePanel()
     {
         Dock = DockStyle.Fill;
+        // On a small screen the panel scrolls instead of squeezing the diagnosis out of sight.
+        AutoScroll = true;
+        AutoScrollMinSize = new Size(0, 720);
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(14, 10, 14, 10) };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
@@ -161,6 +164,7 @@ internal sealed class DevicePanel : Panel
         _output.Font = Theme.Body;
         _output.ForeColor = Theme.Text;
         _graph.BackColor = Theme.Card;
+        if (Theme.Icons != null) { _again.Font = Theme.Icons; _again.Text = "\uE72C"; } // Refresh icon
     }
 
     public DeviceTools? Tools

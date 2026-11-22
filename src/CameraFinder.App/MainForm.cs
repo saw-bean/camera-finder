@@ -166,7 +166,7 @@ public sealed class MainForm : Form
         var deviceCard = new FluentCard { Dock = DockStyle.Fill, RowCount = 1, Padding = new Padding(2) };
         deviceCard.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         deviceCard.Controls.Add(_panel, 0, 0);
-        var listAndDevice = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterWidth = 10, FixedPanel = FixedPanel.Panel2 };
+        var listAndDevice = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterWidth = 10, FixedPanel = FixedPanel.Panel2, Panel2MinSize = 380 };
         listAndDevice.Panel1.Controls.Add(devicesCard);
         listAndDevice.Panel2.Controls.Add(deviceCard);
 
