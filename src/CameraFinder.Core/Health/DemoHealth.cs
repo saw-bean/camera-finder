@@ -136,8 +136,12 @@ public sealed class DemoHealth : IPinger, IHopProber, IOnvifClient, IStreamProbe
     /// <summary>Seconds per simulated second (tests run faster).</summary>
     public TimeSpan Tick { get; init; } = TimeSpan.FromSeconds(1);
 
+    /// <summary>Simulated camera delay for the flash test: the i-PRO on the bad cable is slow, the rest are normal.</summary>
+    public static double CameraDelayFor(string ip) => ip == LossyDevice ? 1.6 : 0.32;
+
     public async Task RunAsync(string url, Credentials? login, IPAddress? source, LiveStats stats, Action<LiveSample> onSecond, CancellationToken ct)
     {
+        stats.Delay.Started(DelayTracker.Now());
         await Task.Delay(300, ct);
         string ip = Uri.TryCreate(url, UriKind.Absolute, out var u) ? u.Host : "";
         if (!IPAddress.TryParse(ip, out var addr) || !Reachable(addr)) throw new LiveStreamException("Connection timed out");
@@ -149,9 +153,28 @@ public sealed class DemoHealth : IPinger, IHopProber, IOnvifClient, IStreamProbe
         int fps = sub ? 15 : ip == "172.16.8.30" ? 30 : 25;
         int gop = ip == "172.16.8.30" ? 8 : 2;
         var start = DateTime.UtcNow; // simulated clock: one tick is one second of video
+        stats.Delay.Playing(DelayTracker.Now());
+        double camDelay = CameraDelayFor(ip);
+        double frameBytes = baseKbps * 1000 / 8 / fps;
+        var answered = new HashSet<double>();
         for (int t = 0; !ct.IsCancellationRequested; t++)
         {
+            double tickStart = DelayTracker.Now();
             await Task.Delay(Tick, ct);
+            // Frame timing for the delay checks: frames spread over the tick, bursty on the lossy camera; a big frame
+            // answers each flash of the flash test after this camera's delay.
+            double span = DelayTracker.Now() - tickStart;
+            var flashes = FlashTimes(stats.Delay);
+            for (int i = 0; i < fps; i++)
+            {
+                double at = tickStart + span * i / fps;
+                if (ip == LossyDevice && !sub) at += Next(0, 450) / 1000.0 * span;            // uneven arrival
+                bool k = i == 0 && t % gop == 0;
+                int bytes = (int)(frameBytes * (k ? 8 : 0.8) * (0.9 + Next(0, 20) / 100.0));
+                double? flash = flashes.FirstOrDefault(f => !answered.Contains(f) && at >= f + camDelay * span, double.NaN);
+                if (flash is { } fl && !double.IsNaN(fl)) { answered.Add(fl); bytes *= 10; }
+                stats.Delay.AddFrame(Math.Min(at, DelayTracker.Now()), (uint)((t * fps + i) * 90000L / fps), 90000, bytes, k);
+            }
             bool key = t % gop == 0;
             int frames = fps, lost = 0;
             double kbps = baseKbps * (0.85 + Next(0, 30) / 100.0) * (key ? 1.35 : 1.0);
@@ -169,4 +192,6 @@ public sealed class DemoHealth : IPinger, IHopProber, IOnvifClient, IStreamProbe
             onSecond(sample);
         }
     }
+
+    private static List<double> FlashTimes(DelayTracker d) => d.FlashTimes.ToList();
 }

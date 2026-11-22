@@ -51,6 +51,13 @@ public static class DiagnosisWriter
             foreach (var a in n.Advice) sb.AppendLine($"  - {a}");
         }
 
+        if (s.Delay is { } d && (d.TimeToPicture != null || d.BufferNeededMs != null || d.CameraDelay != null))
+        {
+            sb.AppendLine();
+            sb.AppendLine("Live view delay, measured straight from the camera (no NVR in between):");
+            foreach (var line in DelayLines(d)) sb.AppendLine("  - " + line);
+        }
+
         var fine = WhatLooksFine(s, findings);
         if (fine.Count > 0)
         {
@@ -78,6 +85,25 @@ public static class DiagnosisWriter
             foreach (var n in s.NotChecked) sb.AppendLine($"  - {n}");
         }
         return sb.ToString().TrimEnd() + Environment.NewLine;
+    }
+
+    public static IEnumerable<string> DelayLines(DelayReport d)
+    {
+        if (d.TimeToPicture is { } ttp)
+            yield return $"First picture after {ttp:0.#} s" + (d.ConnectSeconds is { } c ? $" (connecting {c:0.#} s, then waiting {ttp - c:0.#} s for a key frame)" : "") + ".";
+        if (d.BufferNeededMs is { } b)
+            yield return b < 150 ? $"Frames arrive evenly: a player needs only about {b:0} ms of buffer."
+                                 : $"Frames arrive in bursts: a player needs about {b / 1000:0.##} s of buffer to play smoothly.";
+        if (d.FallingBehindPerMinute is { } fb)
+            yield return fb < 0.2 ? $"Keeping up with real time (watched {d.SecondsWatched / 60:0.#} min)." : $"Falling behind by {fb:0.#} s per minute.";
+        else if (d.SecondsWatched > 0)
+            yield return $"Whether delay builds up over time shows after 40 s of watching (now {d.SecondsWatched:0} s).";
+        if (d.CameraDelay is { } cam)
+            yield return $"Camera + network delay (flash test): {cam:0.##} s ({d.FlashesSeen} of {d.FlashesShown} flashes seen, {d.CameraDelayMin:0.##}-{d.CameraDelayMax:0.##} s).";
+        else if (d.FlashesShown > 0)
+            yield return $"The flash test did not see the flashes ({d.FlashesShown} shown): point the camera at the screen so the pattern fills most of the picture, and try again.";
+        else
+            yield return "Camera + network delay: not measured yet - press \"Measure camera delay\" and point the camera at the laptop screen.";
     }
 
     /// <summary>The events as a timeline, one plain sentence per line.</summary>

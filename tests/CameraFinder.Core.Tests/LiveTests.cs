@@ -231,6 +231,10 @@ static partial class Tests
         Assert.True(stats.Fps is > 20 and < 30, $"[{auth}] fps {stats.Fps}");
         Assert.True(stats.KeyframeInterval is > 1.5 and < 2.6, $"[{auth}] key frame interval {stats.KeyframeInterval}");
         Assert.True(stats.LossPercent < 1, $"[{auth}] loss {stats.LossPercent}");
+        var delay = stats.Delay.Report();
+        Console.WriteLine($"     [{auth}] first picture {delay.TimeToPicture:0.##} s (connect {delay.ConnectSeconds:0.##} s), buffer needed {delay.BufferNeededMs:0} ms");
+        Assert.True(delay.TimeToPicture is > 0 and < 3, $"[{auth}] time to picture {delay.TimeToPicture}");
+        Assert.True(delay.BufferNeededMs is >= 0 and < 250, $"[{auth}] buffer needed {delay.BufferNeededMs}");
 
         try
         {

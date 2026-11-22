@@ -79,6 +79,9 @@ internal sealed class DevicePanel : Panel
     private readonly TextBox _community = new() { Width = 160, PlaceholderText = "SNMP community", Margin = new Padding(0, 4, 3, 3) };
     private readonly FluentButton _useCommunity = new() { Text = "Use", Primary = true, MinimumSize = new Size(60, 32) };
     private readonly Label _videoTitle = Heading("Video check (ffmpeg)");
+    private readonly Label _delayTitle = Heading("Live view delay");
+    private readonly Label _delay = new() { AutoSize = true, MaximumSize = new Size(400, 0), Margin = new Padding(0, 0, 0, 4) };
+    private readonly FluentButton _flash = new() { Text = "Measure camera delay (flash test)…", MinimumSize = new Size(120, 32), Enabled = false };
     private readonly Label _diagTitle = Heading("Diagnosis");
     private readonly Label _bwTitle = new() { Text = "Video stream bandwidth (RTSP)", AutoSize = true, Margin = new Padding(0, 10, 8, 2) };
     private readonly ComboBox _streams = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200, Margin = new Padding(0, 0, 0, 0) };
@@ -121,7 +124,7 @@ internal sealed class DevicePanel : Panel
         Dock = DockStyle.Fill;
         // On a small screen the panel scrolls instead of squeezing the diagnosis out of sight.
         AutoScroll = true;
-        AutoScrollMinSize = new Size(0, 1060);
+        AutoScrollMinSize = new Size(0, 1280);
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(14, 10, 14, 10) };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
@@ -144,6 +147,7 @@ internal sealed class DevicePanel : Panel
             _portTitle, _portKbps, _port, _snmpRow, _portGraph,
             bwHeader, _kbps, _bwDetails, _urlRow, _graph,
             _videoTitle, _video,
+            _delayTitle, _delay, _flash,
             _diagTitle, views, _output,
         };
         layout.RowCount = rows.Length;
@@ -193,6 +197,7 @@ internal sealed class DevicePanel : Panel
             CustomUrls[_device.Ip.ToString()] = u;
             Start();
         };
+        _flash.Click += (_, _) => RunFlashTest();
         _useCommunity.Click += (_, _) =>
         {
             string c = _community.Text.Trim();
@@ -225,7 +230,7 @@ internal sealed class DevicePanel : Panel
     public void ApplyTheme()
     {
         _title.Font = Theme.Subtitle;
-        foreach (var h in new[] { _bwTitle, _pathTitle, _portTitle, _videoTitle, _diagTitle }) h.Font = Theme.BodyStrong;
+        foreach (var h in new[] { _bwTitle, _pathTitle, _portTitle, _videoTitle, _delayTitle, _diagTitle }) h.Font = Theme.BodyStrong;
         _portKbps.Font = new Font(Theme.Subtitle.FontFamily, 14F, FontStyle.Bold);
         _portGraph.BackColor = Theme.Card;
         _path.Font = Theme.Body;
@@ -257,6 +262,7 @@ internal sealed class DevicePanel : Panel
         _url.Text = "";
         _result = null;
         _snapshot = null;
+        _flashResult = null;
         _reach = null;
         _login = null;
         if (d == null) { Clear(); return; }
@@ -324,6 +330,8 @@ internal sealed class DevicePanel : Panel
         _kbps.Text = "-";
         _bwDetails.Text = "";
         _video.Text = "";
+        _delay.Text = _device == null ? "" : "Measured from the live stream once it plays.";
+        _flash.Enabled = false;
         _graph.Data = Array.Empty<LiveSample>();
         _fillingStreams = true;
         _streams.Items.Clear();
@@ -586,11 +594,24 @@ internal sealed class DevicePanel : Panel
                         (configured is { } c ? $" · set to max {LogNormalizer.Mbps(c)}" : "") +
                         (stats.LossPercent >= 0.5 ? $" · {stats.LossPercent:0.#}% packets missing" : "") +
                         $"\nMeasured over the last {Math.Min(stats.Seconds, LiveStats.HistorySeconds)} s. This is one viewer's copy; the NVR pulls its own.";
+                    // Live view delay: refresh the numbers every few seconds.
+                    if (main && stats.Seconds % 3 == 0)
+                    {
+                        var delay = stats.Delay.Report();
+                        if (_snapshot != null) delay.CameraDelay ??= _snapshot.Delay?.CameraDelay;
+                        _delay.Text = string.Join(Environment.NewLine, DiagnosisWriter.DelayLines(MergeFlash(delay)));
+                        _flash.Enabled = true;
+                    }
                     // Without ffprobe (or from a temporary IP), the live measurement is the video check.
                     if (main && stats.Seconds == 10 && _snapshot != null && (_snapshot.Stream == null || _streamFromLive))
                     {
                         _snapshot.Stream = stats.ToReport(FfprobeStreamProber.Redact(url), nominalFps);
                         _streamFromLive = true;
+                    }
+                    // Update the diagnosis with the delay numbers after 10 s and once it can tell whether delay builds up.
+                    if (main && stats.Seconds is 10 or 45 && _snapshot != null)
+                    {
+                        _snapshot.Delay = MergeFlash(stats.Delay.Report());
                         ShowResult(HealthCheck.Analyse(_snapshot));
                     }
                 }), ct);
@@ -621,6 +642,34 @@ internal sealed class DevicePanel : Panel
                 Post(() => { if (!ct.IsCancellationRequested) { _kbps.Text = "-"; _bwDetails.Text = "Live bandwidth: " + ex.Message; } });
             }
         }, ct);
+    }
+
+    // ------------------------------------------------------------------ live view delay
+
+    private DelayReport? _flashResult;
+
+    /// <summary>Keep the flash test's result when the live numbers are refreshed.</summary>
+    private DelayReport MergeFlash(DelayReport r)
+    {
+        if (_flashResult is { } f && r.CameraDelay == null && r.FlashesShown == 0)
+        {
+            r.CameraDelay = f.CameraDelay; r.CameraDelayMin = f.CameraDelayMin; r.CameraDelayMax = f.CameraDelayMax;
+            r.FlashesSeen = f.FlashesSeen; r.FlashesShown = f.FlashesShown;
+        }
+        return r;
+    }
+
+    private void RunFlashTest()
+    {
+        if (_live is not { } stats || _snapshot == null) return;
+        using var w = new FlashTestWindow(stats.Delay);
+        w.ShowDialog(FindForm());
+        if (w.Result is not { } r) return;
+        _flashResult = r;
+        _snapshot.Delay = MergeFlash(stats.Delay.Report());
+        _delay.Text = string.Join(Environment.NewLine, DiagnosisWriter.DelayLines(_snapshot.Delay));
+        ShowResult(HealthCheck.Analyse(_snapshot));
+        ShowView(0);
     }
 
     // ------------------------------------------------------------------ logins

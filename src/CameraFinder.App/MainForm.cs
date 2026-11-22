@@ -246,6 +246,13 @@ public sealed class MainForm : Form
             if (_engine?.Devices.FirstOrDefault(d => d.Ip.ToString() == "192.168.1.108") is { } dahua) SelectRow(dahua);
             await Task.Delay(15000);
             Snap(this, Path.Combine(folder, $"{theme}-6-restart-loop.png"));
+            using (var flash = new FlashTestWindow(new DelayTracker()))
+            {
+                flash.Show(this);
+                await Task.Delay(800);
+                Snap(flash, Path.Combine(folder, $"{theme}-8-flash-test.png"));
+                flash.Close();
+            }
             await TraceSelectedAsync();
             await Task.Delay(4000);
             if (OwnedForms.LastOrDefault() is { } trace) { Snap(trace, Path.Combine(folder, $"{theme}-7-trace.png")); trace.Close(); }

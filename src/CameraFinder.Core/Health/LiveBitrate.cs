@@ -20,6 +20,8 @@ public sealed class LiveStats
     private int _seconds, _totalFrames, _longestGapMs;
 
     public string? Codec { get; set; }
+    /// <summary>Frame-by-frame timing for the live view delay checks.</summary>
+    public DelayTracker Delay { get; } = new();
     public IReadOnlyList<LiveSample> History { get { lock (_history) return _history.ToList(); } }
     public double CurrentKbps { get { lock (_history) return _history.Count == 0 ? 0 : _history[^1].Kbps; } }
     public double AverageKbps => _seconds == 0 ? 0 : _totalKbps / _seconds;
@@ -59,7 +61,7 @@ public sealed class LiveStats
     }
 
     /// <summary>The measurement so far, in the form the health check's patterns understand.</summary>
-    public StreamReport ToReport(string url, double? nominalFps) => new()
+    public StreamReport ToReport(string url, double? nominalFps) => new StreamReport
     {
         Url = url, Opened = true, Codec = Codec, NominalFps = nominalFps, SecondsWatched = _seconds,
         Frames = _totalFrames, MeasuredFps = _seconds < 2 ? null : (double)_totalFrames / _seconds,
@@ -99,6 +101,7 @@ public sealed class RtspLiveSource : ILiveStreamSource
             login = new Credentials(Uri.UnescapeDataString(parts[0]), parts.Length > 1 ? Uri.UnescapeDataString(parts[1]) : "");
         }
         string plainUrl = FfprobeStreamProber.Redact(url);
+        stats.Delay.Started(DelayTracker.Now());
         using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true, ReceiveBufferSize = 1 << 20 };
         if (source != null) socket.Bind(new IPEndPoint(source, 0));
         using (var connect = CancellationTokenSource.CreateLinkedTokenSource(ct))
@@ -124,15 +127,16 @@ public sealed class RtspLiveSource : ILiveStreamSource
         var withSession = new Dictionary<string, string> { ["Session"] = session };
         string playUrl = Sdp.Resolve(baseUrl, sdp.SessionControl);
         await rtsp.RequestAsync("PLAY", playUrl, new() { ["Session"] = session, ["Range"] = "npt=0.000-" }, ct);
+        stats.Delay.Playing(DelayTracker.Now());
 
-        try { await ReadLoopAsync(stream, rtsp, channel, video.Codec, baseUrl, withSession, stats, onSecond, ct); }
+        try { await ReadLoopAsync(stream, rtsp, channel, video.Codec, video.ClockRate ?? 90000, baseUrl, withSession, stats, onSecond, ct); }
         finally
         {
             try { await rtsp.SendOnlyAsync("TEARDOWN", baseUrl, withSession); } catch { /* best effort */ }
         }
     }
 
-    private static async Task ReadLoopAsync(NetworkStream stream, RtspSession rtsp, int channel, string? codec, string url,
+    private static async Task ReadLoopAsync(NetworkStream stream, RtspSession rtsp, int channel, string? codec, int clockRate, string url,
         Dictionary<string, string> session, LiveStats stats, Action<LiveSample> onSecond, CancellationToken ct)
     {
         var reader = new FrameReader(stream);
@@ -141,6 +145,8 @@ public sealed class RtspLiveSource : ILiveStreamSource
         long bytes = 0;
         int frames = 0, lost = 0, received = 0;
         bool key = false;
+        int frameBytes = 0;
+        bool frameKey = false;
         int? lastSeq = null;
         DateTime? lastFrameAt = null;
         bool hevc = codec?.StartsWith("H265", StringComparison.OrdinalIgnoreCase) == true || codec?.StartsWith("HEVC", StringComparison.OrdinalIgnoreCase) == true;
@@ -162,9 +168,14 @@ public sealed class RtspLiveSource : ILiveStreamSource
                 lastSeq = seq;
                 int header = 12 + 4 * (payload[0] & 0x0F);
                 if ((payload[0] & 0x10) != 0 && length >= header + 4) header += 4 + 4 * ((payload[header + 2] << 8) | payload[header + 3]);
-                if (length > header && IsKeyFrame(payload.AsSpan(header, length - header), hevc)) key = true;
+                frameBytes += length;
+                if (length > header && IsKeyFrame(payload.AsSpan(header, length - header), hevc)) key = frameKey = true;
                 if ((payload[1] & 0x80) != 0) // marker: last packet of a frame
                 {
+                    uint rtpTime = (uint)(payload[4] << 24 | payload[5] << 16 | payload[6] << 8 | payload[7]);
+                    stats.Delay.AddFrame(DelayTracker.Now(), rtpTime, clockRate, frameBytes, frameKey);
+                    frameBytes = 0;
+                    frameKey = false;
                     frames++;
                     if (lastFrameAt is { } lf) stats.AddGap((int)(now - lf).TotalMilliseconds);
                     lastFrameAt = now;
@@ -431,11 +442,12 @@ internal sealed class RtspSession
 /// <summary>The parts of an SDP description needed to play the video track.</summary>
 public sealed record Sdp(string? SessionControl, Sdp.Media? Video)
 {
-    public sealed record Media(string? Codec, string? Control);
+    public sealed record Media(string? Codec, string? Control, int? ClockRate = null);
 
     public static Sdp Parse(string sdp)
     {
         string? sessionControl = null, codec = null, control = null;
+        int? clock = null;
         bool inVideo = false, inAny = false, videoDone = false;
         foreach (var raw in sdp.Split('\n'))
         {
@@ -455,10 +467,15 @@ public sealed record Sdp(string? SessionControl, Sdp.Media? Video)
             else if (inVideo && l.StartsWith("a=rtpmap:"))
             {
                 var parts = l.Split(' ', 2);
-                if (parts.Length == 2) codec = parts[1].Split('/')[0].Trim().ToUpperInvariant();
+                if (parts.Length == 2)
+                {
+                    var enc = parts[1].Split('/');
+                    codec = enc[0].Trim().ToUpperInvariant();
+                    if (enc.Length > 1 && int.TryParse(enc[1].Trim(), out int hz) && hz > 0) clock = hz;
+                }
             }
         }
-        return new Sdp(sessionControl, videoDone || inVideo ? new Media(codec, control) : null);
+        return new Sdp(sessionControl, videoDone || inVideo ? new Media(codec, control, clock) : null);
     }
 
     /// <summary>Control attributes are absolute ("rtsp://...") or relative to the Content-Base ("trackID=1"); "*" means the base itself.</summary>

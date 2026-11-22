@@ -117,6 +117,8 @@ public sealed class HealthSnapshot
     public StreamReport? Stream { get; set; }
     /// <summary>The switch port the device is plugged into (SNMP), when a managed switch knows it.</summary>
     public SwitchPortReport? Port { get; set; }
+    /// <summary>Live view delay measurements (from the live stream and the flash test).</summary>
+    public DelayReport? Delay { get; set; }
 
     /// <summary>Checks that could not run, in plain words ("Video stream not checked: ffprobe.exe is missing").</summary>
     public List<string> NotChecked { get; } = new();
