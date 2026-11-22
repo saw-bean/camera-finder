@@ -92,6 +92,12 @@ public sealed class RtspLiveSource : ILiveStreamSource
     public async Task RunAsync(string url, Credentials? login, IPAddress? source, LiveStats stats, Action<LiveSample> onSecond, CancellationToken ct)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme != "rtsp") throw new LiveStreamException("Not an RTSP address");
+        // A typed-in address may carry its own login: rtsp://user:pass@host/path.
+        if (login is not { IsEmpty: false } && uri.UserInfo.Length > 0)
+        {
+            var parts = uri.UserInfo.Split(':', 2);
+            login = new Credentials(Uri.UnescapeDataString(parts[0]), parts.Length > 1 ? Uri.UnescapeDataString(parts[1]) : "");
+        }
         string plainUrl = FfprobeStreamProber.Redact(url);
         using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true, ReceiveBufferSize = 1 << 20 };
         if (source != null) socket.Bind(new IPEndPoint(source, 0));

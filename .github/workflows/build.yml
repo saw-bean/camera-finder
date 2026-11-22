@@ -22,6 +22,18 @@ jobs:
         run: sudo apt-get install -y libpcap0.8
       - name: Unit tests
         run: dotnet run --project tests/CameraFinder.Core.Tests -c Release -- --unit-only
+      - name: Live bandwidth and ffprobe against a real RTSP server (mediamtx + ffmpeg, digest and basic login)
+        run: |
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          for auth in digest basic; do
+            bash tools/rtsp-test-server.sh "$RUNNER_TEMP/rtsp" "$auth"
+            RTSP_TEST_URL=rtsp://127.0.0.1:8554/cam RTSP_TEST_AUTH=$auth \
+              dotnet tests/CameraFinder.Core.Tests/bin/Release/net8.0/CameraFinder.Core.Tests.dll --unit-only | tee "$RUNNER_TEMP/out-$auth.txt"
+            kill $(cat "$RUNNER_TEMP/rtsp/pids") || true
+            sleep 1
+            grep -q "PASS TestLiveBandwidthAgainstARealRtspServer" "$RUNNER_TEMP/out-$auth.txt" || { cat "$RUNNER_TEMP/rtsp/"*.log; exit 1; }
+          done
+
       - name: Live network tests (fake camera on this machine)
         # Need raw capture and port 80, so run as root. Hosted runners may restrict multicast, so don't fail the build.
         continue-on-error: true

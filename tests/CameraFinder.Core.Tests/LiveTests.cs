@@ -191,3 +191,70 @@ static partial class Tests
         catch (LiveStreamException ex) { Assert.True(ex.LoginRefused, "login needed"); }
     }
 }
+
+static partial class Tests
+{
+    public static async Task TestNonCamerasAreCalledDevicesAndGetNoOnvif()
+    {
+        var site = new DemoSite { ArpDelay = TimeSpan.Zero, JoinDelay = TimeSpan.Zero };
+        var demo = new DemoHealth(site);
+        var check = new HealthCheck(demo, demo, demo, demo);
+        var router = new Device(IPAddress.Parse("192.168.1.1")) { Model = "UniFi Dream Machine Pro" };
+        var r = await check.RunAsync(router, null,
+            new HealthCheckOptions { CheckOnvif = false, PingCount = 3, PingInterval = TimeSpan.Zero, TraceRounds = 1 }, null, CancellationToken.None);
+        Assert.True(r.Snapshot.Onvif == null, "no ONVIF for a router");
+        Assert.True(!r.Diagnosis.Contains("camera", StringComparison.OrdinalIgnoreCase), r.Diagnosis);
+
+        var dead = HealthCheck.Analyse(new HealthSnapshot { Ip = IPAddress.Parse("10.0.0.9"), IsCamera = false, Ping = new PingSample(5, 0, Array.Empty<long>()) });
+        Assert.Equal("The device is not answering at all", dead.Findings[0].Title);
+        Assert.True(!dead.Diagnosis.Contains("camera", StringComparison.OrdinalIgnoreCase), dead.Diagnosis);
+    }
+
+    /// <summary>
+    /// The live bandwidth client against a real RTSP server (mediamtx, fed by ffmpeg) - an independent implementation,
+    /// not our own fake. CI sets RTSP_TEST_URL (and RTSP_TEST_AUTH) after starting them; skipped elsewhere.
+    /// Expected stream: H.264 1280x720, 25 fps, ~2 Mbit/s, key frame every 50 frames (2 s), login admin / secret.
+    /// </summary>
+    public static async Task TestLiveBandwidthAgainstARealRtspServer()
+    {
+        string url = Environment.GetEnvironmentVariable("RTSP_TEST_URL") ?? throw new SkipException("RTSP_TEST_URL not set (CI starts mediamtx)");
+        string auth = Environment.GetEnvironmentVariable("RTSP_TEST_AUTH") ?? "?";
+        var stats = new LiveStats();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        int n = 0;
+        try { await new RtspLiveSource().RunAsync(url, new Credentials("admin", "secret"), null, stats, _ => { if (++n == 8) cts.Cancel(); }, cts.Token); }
+        catch (OperationCanceledException) { }
+        Console.WriteLine($"     [{auth}] {stats.Codec} avg {stats.AverageKbps:0} kbit/s peak {stats.PeakKbps:0} fps {stats.Fps:0.#} key every {stats.KeyframeInterval:0.##} s loss {stats.LossPercent:0.##}%");
+        Assert.True(n >= 8, $"[{auth}] got {n} seconds of video");
+        Assert.Equal("H264", stats.Codec);
+        Assert.True(stats.AverageKbps is > 800 and < 5000, $"[{auth}] bitrate {stats.AverageKbps}");
+        Assert.True(stats.Fps is > 20 and < 30, $"[{auth}] fps {stats.Fps}");
+        Assert.True(stats.KeyframeInterval is > 1.5 and < 2.6, $"[{auth}] key frame interval {stats.KeyframeInterval}");
+        Assert.True(stats.LossPercent < 1, $"[{auth}] loss {stats.LossPercent}");
+
+        try
+        {
+            await new RtspLiveSource().RunAsync(url, new Credentials("admin", "wrong"), null, new LiveStats(), _ => { }, CancellationToken.None);
+            throw new Exception("wrong password accepted");
+        }
+        catch (LiveStreamException ex) { Assert.True(ex.LoginRefused, $"[{auth}] wrong password: {ex.Message}"); }
+
+        // The login can also come inside the address, as a technician might paste it.
+        var inline = new LiveStats();
+        using var c2 = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        int m = 0;
+        var withLogin = new UriBuilder(url) { UserName = "admin", Password = "secret" }.Uri.AbsoluteUri;
+        try { await new RtspLiveSource().RunAsync(withLogin, null, null, inline, _ => { if (++m == 2) c2.Cancel(); }, c2.Token); }
+        catch (OperationCanceledException) { }
+        Assert.True(m >= 2, $"[{auth}] login inside the address");
+
+        // ffprobe (the same tool the app bundles) against the same stream.
+        if (ExternalTool.Find(ExternalTool.FfprobeExe) is { } ffprobe)
+        {
+            var rep = await new FfprobeStreamProber(ffprobe).ProbeAsync(url, new Credentials("admin", "secret"), TimeSpan.FromSeconds(5), CancellationToken.None);
+            Assert.True(rep.Opened, $"[{auth}] ffprobe: {rep.Error}");
+            Assert.Equal(1280, rep.Width);
+            Assert.True(rep.MeasuredFps is > 20 and < 30, $"[{auth}] ffprobe fps {rep.MeasuredFps}");
+        }
+    }
+}

@@ -106,6 +106,8 @@ public sealed class HealthSnapshot
     public string? Mac { get; init; }
     public string? Description { get; init; }
     public string? Vendor { get; init; }
+    /// <summary>False for routers, PCs, door controllers...: no camera checks, and the wording says "device".</summary>
+    public bool IsCamera { get; init; } = true;
     public IReadOnlyCollection<int> OpenPorts { get; init; } = Array.Empty<int>();
     public DateTime CheckedAt { get; init; } = DateTime.Now;
 
