@@ -31,7 +31,7 @@ Requirements: Windows 10 version 2004 or later / Windows 11, administrator right
 
 ### Updates
 
-On start, the app asks GitHub (`api.github.com`) whether a newer release exists. If one does, the status bar shows **Update available – click to install**: the app downloads the new installer, closes (removing temporary IPs) and starts setup, which upgrades in place. With no internet (common on site networks) the check is silently skipped.
+Updates install themselves. On start, the app asks GitHub (`api.github.com`) whether a newer release exists. If one does, it downloads the installer in the background, checks it against the SHA-256 GitHub publishes for it, and installs it silently when you close Camera Finder (after the temporary IPs are removed), so the next start is the new version. Nothing interrupts you on site; the status bar says an update is waiting, and clicking it installs right away and restarts the app. With no internet (common on site networks) the check is silently skipped and tried again next start.
 
 To publish an update (maintainers): push a version tag, e.g. `git tag v0.2.0 && git push origin v0.2.0`. CI builds the installer and attaches it to a new release.
 
