@@ -91,7 +91,9 @@ internal sealed class DevicePanel : Panel
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(14, 10, 14, 10) };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        var buttons = Flow(_open, _ping, _trace, _copy, _again);
+        var buttons = Flow(_open, _ping, _trace, _copy);
+        var titleRow = Flow(_title, _again);
+        _again.Margin = new Padding(10, 0, 0, 0);
         _reachRow.Controls.AddRange(new Control[] { _reachNote, _join });
         var loginFields = Flow(_user, _password, _useLogin);
         _loginRow.FlowDirection = FlowDirection.TopDown;
@@ -99,7 +101,7 @@ internal sealed class DevicePanel : Panel
         var bwHeader = Flow(_bwTitle, _streams);
         var views = Flow(_showDiagnosis, _showEvents, _showRaw);
 
-        var rows = new Control[] { _title, _subtitle, _state, buttons, _reachRow, _loginRow, bwHeader, _kbps, _bwDetails, _graph, _video, views, _output };
+        var rows = new Control[] { titleRow, _subtitle, _state, buttons, _reachRow, _loginRow, bwHeader, _kbps, _bwDetails, _graph, _video, views, _output };
         layout.RowCount = rows.Length;
         for (int i = 0; i < rows.Length; i++)
         {
@@ -569,7 +571,9 @@ internal sealed class Sparkline : Control
         }
         double max = Math.Max(_data.Max(s => s.Kbps), Peak ?? 0) * 1.15;
         if (max <= 0) max = 1;
-        float step = area.Width / (LiveStats.HistorySeconds - 1);
+        // Fill the width from the start: 30 s at first, growing to the full two minutes.
+        int window = Math.Clamp(_data.Count, 30, LiveStats.HistorySeconds);
+        float step = area.Width / (window - 1);
         float x0 = area.Right - step * (_data.Count - 1);
         PointF At(int i) => new(x0 + step * i, area.Bottom - (float)(_data[i].Kbps / max) * area.Height);
 

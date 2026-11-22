@@ -144,7 +144,8 @@ public sealed class DemoHealth : IPinger, IHopProber, IOnvifClient, IStreamProbe
         if (login is not { IsEmpty: false }) throw new LiveStreamException("401 Unauthorized: the stream needs a login", loginRefused: true);
         bool sub = url.EndsWith("/sub");
         stats.Codec = "H264";
-        double baseKbps = sub ? 480 : ip switch { LossyDevice => 3600, "172.16.8.30" => 4800, _ => 5600 };
+        // Average below the profile's 6 Mbit/s limit; key frames burst above the average.
+        double baseKbps = sub ? 380 : ip switch { LossyDevice => 3200, "172.16.8.30" => 3800, _ => 4200 };
         int fps = sub ? 15 : ip == "172.16.8.30" ? 30 : 25;
         int gop = ip == "172.16.8.30" ? 8 : 2;
         var start = DateTime.UtcNow; // simulated clock: one tick is one second of video
@@ -153,7 +154,7 @@ public sealed class DemoHealth : IPinger, IHopProber, IOnvifClient, IStreamProbe
             await Task.Delay(Tick, ct);
             bool key = t % gop == 0;
             int frames = fps, lost = 0;
-            double kbps = baseKbps * (0.85 + Next(0, 30) / 100.0) * (key ? 1.6 : 1.0);
+            double kbps = baseKbps * (0.85 + Next(0, 30) / 100.0) * (key ? 1.35 : 1.0);
             if (ip == LossyDevice && !sub)
             {
                 frames = Next(14, 22);
