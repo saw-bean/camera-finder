@@ -4,6 +4,8 @@
 ; Npcap (optional, for passive listening) cannot legally be bundled (free licence), so setup can download the
 ; official installer from npcap.com and start it; the user accepts Npcap's own licence in its wizard.
 ; To move to a newer Npcap: update NpcapVersion and NpcapSha256 (sha256 of https://npcap.com/dist/npcap-<ver>.exe).
+; The health check and speed test use ffprobe and iperf3, which ARE bundled (their licences allow it): CI runs
+; tools/fetch-tools.ps1 to put them, hash-checked, in {#SourceDir}\tools before this script is compiled.
 
 #ifndef AppVersion
   #define AppVersion "0.1.0"
@@ -44,6 +46,7 @@ Name: "npcap"; Description: "Download and install Npcap {#NpcapVersion} (recomme
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "licenses\*"; DestDir: "{app}\tools\licenses"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Camera Finder"; Filename: "{app}\CameraFinder.exe"
@@ -51,7 +54,14 @@ Name: "{group}\Uninstall Camera Finder"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\Camera Finder"; Filename: "{app}\CameraFinder.exe"; Tasks: desktopicon
 
 [Run]
+; The speed test server must accept connections from the other laptop. Replace any old rule, then allow iperf3 itself
+; (only that program, only while it runs) on private and domain networks.
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Camera Finder speed test (iperf3)"""; Flags: runhidden; StatusMsg: "Allowing the speed test through Windows Firewall..."
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Camera Finder speed test (iperf3)"" dir=in action=allow program=""{app}\tools\iperf3.exe"" profile=private,domain enable=yes"; Flags: runhidden
 Filename: "{app}\CameraFinder.exe"; Description: "Start Camera Finder"; Flags: nowait postinstall skipifsilent shellexec
+
+[UninstallRun]
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Camera Finder speed test (iperf3)"""; Flags: runhidden; RunOnceId: "RemoveIperfFirewallRule"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{commonappdata}\CameraFinder"

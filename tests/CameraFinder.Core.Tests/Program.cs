@@ -48,7 +48,7 @@ static class Assert
     public static void True(bool condition, string message) { if (!condition) throw new Exception(message); }
 }
 
-static class Tests
+static partial class Tests
 {
     // ---------- IPv4 maths ----------
     public static void TestSubnetMaths()
