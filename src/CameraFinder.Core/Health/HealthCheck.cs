@@ -12,6 +12,8 @@ public sealed class HealthCheckOptions
     public int TraceRounds { get; init; } = 5;
     public bool CheckStream { get; init; } = true;
     public TimeSpan StreamWatch { get; init; } = TimeSpan.FromSeconds(8);
+    /// <summary>Ask over ONVIF (and send the login). Off for devices that are not cameras: no point, and no passwords sent to them.</summary>
+    public bool CheckOnvif { get; init; } = true;
     /// <summary>
     /// The source address is a temporary one (added with skipassource). ffprobe cannot be told to connect from it, and
     /// Windows never picks it, so the stream check is skipped instead of reporting a false failure.
@@ -75,7 +77,7 @@ public sealed class HealthCheck
         {
             snap = new HealthSnapshot
             {
-                Ip = device.Ip, Mac = device.Mac, Vendor = device.Vendor, Description = device.Description,
+                Ip = device.Ip, Mac = device.Mac, Vendor = device.Vendor, Description = device.Description, IsCamera = options.CheckOnvif,
                 OpenPorts = device.OpenPorts.ToArray(), CheckedAt = DateTime.Now,
             };
         }
@@ -87,6 +89,12 @@ public sealed class HealthCheck
         snap.Ping = await ping;
         try { snap.Path = await path; }
         catch (Exception ex) when (ex is not OperationCanceledException) { snap.NotChecked.Add("Path not traced: " + ex.Message); }
+
+        if (!options.CheckOnvif)
+        {
+            progress?.Report("Working out the diagnosis…");
+            return Analyse(snap);
+        }
 
         progress?.Report("Asking the camera over ONVIF (identity, clock, log, video settings)…");
         int port = OnvifPort(snap.OpenPorts);
@@ -121,8 +129,18 @@ public sealed class HealthCheck
     {
         var events = LogNormalizer.Normalize(snap);
         var findings = PatternDetector.Detect(snap, events);
+        if (!snap.IsCamera)
+        {
+            events = events.Select(e => e with { Text = Neutral(e.Text) }).ToList();
+            findings = findings.Select(f => f with { Title = Neutral(f.Title), Evidence = Neutral(f.Evidence), Advice = f.Advice.Select(Neutral).ToList() }).ToList();
+        }
         return new HealthResult(snap, events, findings, DiagnosisWriter.Write(snap, events, findings));
     }
+
+    /// <summary>The texts are written for cameras; for any other device say "device".</summary>
+    public static string Neutral(string text) => text
+        .Replace("The camera", "The device").Replace("the camera", "the device")
+        .Replace("camera's", "device's").Replace("a camera", "a device");
 
     private async Task<PingSample> PingAsync(IPAddress ip, IPAddress? source, HealthCheckOptions o, CancellationToken ct)
     {

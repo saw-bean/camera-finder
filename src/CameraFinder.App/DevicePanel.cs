@@ -33,6 +33,9 @@ internal sealed class DevicePanel : Panel
     public event Action<Device, IPAddress?>? PingRequested;
     public event Action<Device, IPAddress?>? TraceRequested;
 
+    // Stream addresses typed in by hand, per device IP (cameras with ONVIF off, phones, encoders...).
+    private static readonly Dictionary<string, string> CustomUrls = new();
+
     // Logins a camera refused this session: never retried automatically, so clicking through cameras cannot lock accounts.
     private static readonly HashSet<string> Refused = new();
 
@@ -60,6 +63,10 @@ internal sealed class DevicePanel : Panel
     private readonly Label _kbps = new() { AutoSize = true, Text = "-", Margin = new Padding(0, 4, 0, 0) };
     private readonly Label _bwDetails = new() { AutoSize = true, MaximumSize = new Size(400, 0), Tag = "secondary", Margin = new Padding(0, 0, 0, 4) };
     private readonly Sparkline _graph = new() { Height = 70, Dock = DockStyle.Top, Margin = new Padding(0, 2, 0, 6) };
+    private readonly FlowLayoutPanel _urlRow = new() { AutoSize = true, WrapContents = true, Visible = false, FlowDirection = FlowDirection.TopDown, Margin = new Padding(0, 0, 0, 6) };
+    private readonly Label _urlNote = new() { AutoSize = true, MaximumSize = new Size(380, 0), Margin = new Padding(0, 4, 0, 2) };
+    private readonly TextBox _url = new() { Width = 290, PlaceholderText = "rtsp://address:554/path", Margin = new Padding(0, 4, 3, 3) };
+    private readonly FluentButton _useUrl = new() { Text = "Use", Primary = true, MinimumSize = new Size(60, 32) };
     private readonly Label _video = new() { AutoSize = true, MaximumSize = new Size(400, 0), Margin = new Padding(0, 2, 0, 8) };
 
     private readonly FluentButton _showDiagnosis = new() { Text = "Diagnosis", MinimumSize = new Size(80, 28), Primary = true };
@@ -99,9 +106,10 @@ internal sealed class DevicePanel : Panel
         _loginRow.FlowDirection = FlowDirection.TopDown;
         _loginRow.Controls.AddRange(new Control[] { _loginNote, loginFields });
         var bwHeader = Flow(_bwTitle, _streams);
+        _urlRow.Controls.AddRange(new Control[] { _urlNote, Flow(_url, _useUrl) });
         var views = Flow(_showDiagnosis, _showEvents, _showRaw);
 
-        var rows = new Control[] { titleRow, _subtitle, _state, buttons, _reachRow, _loginRow, bwHeader, _kbps, _bwDetails, _graph, _video, views, _output };
+        var rows = new Control[] { titleRow, _subtitle, _state, buttons, _reachRow, _loginRow, bwHeader, _kbps, _bwDetails, _urlRow, _graph, _video, views, _output };
         layout.RowCount = rows.Length;
         for (int i = 0; i < rows.Length; i++)
         {
@@ -139,6 +147,14 @@ internal sealed class DevicePanel : Panel
             Refused.Remove(RefusedKey(_device, _login));
             Start(loginOverride: _login);
         };
+        _useUrl.Click += (_, _) =>
+        {
+            string u = _url.Text.Trim();
+            if (_device == null || !u.StartsWith("rtsp://", StringComparison.OrdinalIgnoreCase)) { _urlNote.Text = "Enter an address starting with rtsp://"; return; }
+            CustomUrls[_device.Ip.ToString()] = u;
+            Start();
+        };
+        _url.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; _useUrl.PerformClick(); } };
         _password.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; _useLogin.PerformClick(); } };
         _streams.SelectedIndexChanged += (_, _) => { if (!_fillingStreams) StartLive(); };
         _showDiagnosis.Click += (_, _) => ShowView(0);
@@ -187,6 +203,7 @@ internal sealed class DevicePanel : Panel
         }
         Stop();
         _device = d;
+        _url.Text = "";
         _result = null;
         _snapshot = null;
         _reach = null;
@@ -242,6 +259,7 @@ internal sealed class DevicePanel : Panel
         foreach (var b in new[] { _ping, _trace, _copy, _again }) b.Enabled = _device != null;
         _reachRow.Visible = false;
         _loginRow.Visible = false;
+        _urlRow.Visible = false;
         _kbps.Text = "-";
         _bwDetails.Text = "";
         _video.Text = "";
@@ -293,10 +311,13 @@ internal sealed class DevicePanel : Panel
                 ShowReach($"{d.Ip} is in a public range; no temporary IP is added there. Checking from the laptop's own address.", join: false);
 
             // 2. Health: ping, path, ONVIF. Video is measured by the live stream and ffmpeg below.
-            _login = loginOverride ?? PickLogin(d, tools);
+            //    Devices that are not cameras get ping and path only: no ONVIF, so no camera password is sent to them.
+            string? customUrl = CustomUrls.GetValueOrDefault(d.Ip.ToString());
+            bool camera = d.Kind == DeviceKind.Camera || customUrl != null;
+            _login = loginOverride ?? (camera ? PickLogin(d, tools) : null);
             var check = tools.Health();
             var progress = new Progress<string>(s => { if (!ct.IsCancellationRequested) SetState(s, Theme.TextSecondary); });
-            var options = new HealthCheckOptions { Login = _login, CheckStream = false, SourceIsTemporary = tools.IsTemporary(reach.Source) };
+            var options = new HealthCheckOptions { Login = _login, CheckStream = false, CheckOnvif = camera, SourceIsTemporary = tools.IsTemporary(reach.Source) };
             var result = await Task.Run(() => check.RunAsync(d, reach.Source, options, progress, ct), ct);
             if (ct.IsCancellationRequested) return;
             _snapshot = result.Snapshot;
@@ -304,10 +325,17 @@ internal sealed class DevicePanel : Panel
             UpdateLogin(d, tools, _snapshot.Onvif);
             ShowResult(HealthCheck.Analyse(_snapshot));
 
+            if (!camera)
+            {
+                _kbps.Text = "-";
+                AskUrl("Not a camera, so there is no video to measure. If it does stream video (an encoder, a phone app), enter its stream address:");
+                return;
+            }
+
             // 3. Live bandwidth and the ffmpeg check, side by side.
             FillStreams(_snapshot);
             StartLive();
-            if (check.StreamProber is { } ffprobe && !options.SourceIsTemporary && HealthCheck.StreamUrl(_snapshot) is { } url)
+            if (check.StreamProber is { } ffprobe && !options.SourceIsTemporary && (customUrl ?? HealthCheck.StreamUrl(_snapshot)) is { } url)
                 _ = RunFfprobeAsync(ffprobe, url, ct);
             else
                 _video.Text = "ffmpeg: " + (options.SourceIsTemporary
@@ -349,6 +377,11 @@ internal sealed class DevicePanel : Panel
         if (s.Onvif is { } o)
             foreach (var p in o.Profiles.Where(p => o.StreamUris.ContainsKey(p.Token)))
                 _streams.Items.Add(new StreamChoice(p.Token, $"{p.Name ?? p.Token} ({LogNormalizer.ProfileText(p)})", p));
+        if (CustomUrls.ContainsKey(s.Ip.ToString()))
+        {
+            _streams.Items.Clear();
+            _streams.Items.Add(new StreamChoice(null, "Address typed in", null));
+        }
         if (_streams.Items.Count == 0 && HealthCheck.StreamUrl(s) != null)
             _streams.Items.Add(new StreamChoice(null, "Main stream (usual address for this brand)", null));
         if (_streams.Items.Count > 0) _streams.SelectedIndex = 0;
@@ -372,11 +405,12 @@ internal sealed class DevicePanel : Panel
         StopLive();
         if (_device is not { } d || _tools is not { } tools || _snapshot is not { } snap || _cts is not { } parent) return;
         var choice = _streams.SelectedItem as StreamChoice;
-        string? url = HealthCheck.StreamUrl(snap, choice?.Token);
+        string? url = CustomUrls.GetValueOrDefault(d.Ip.ToString()) ?? HealthCheck.StreamUrl(snap, choice?.Token);
         if (url == null)
         {
             _kbps.Text = "-";
-            _bwDetails.Text = "No stream address: the camera did not report one over ONVIF and its brand is not known.";
+            _bwDetails.Text = "";
+            AskUrl("No stream address: the camera did not report one over ONVIF and its brand is not known. Enter it (see the camera's manual or web page):");
             return;
         }
         _liveCts = CancellationTokenSource.CreateLinkedTokenSource(parent.Token);
@@ -423,6 +457,7 @@ internal sealed class DevicePanel : Panel
                     if (ct.IsCancellationRequested) return;
                     _kbps.Text = "-";
                     _bwDetails.Text = "Live bandwidth: " + ex.Message;
+                    if (!ex.LoginRefused) AskUrl("Wrong stream address? Enter another one:");
                     if (ex.LoginRefused && _device != null && _tools != null)
                     {
                         if (login != null) Refused.Add(RefusedKey(_device, login));
@@ -472,6 +507,13 @@ internal sealed class DevicePanel : Panel
                 ? "Enter the camera's user name and password to read its log, settings and video:"
                 : $"The camera refused the login \"{_login.User}\". It will not be tried again automatically. Enter the right one:");
         }
+    }
+
+    private void AskUrl(string note)
+    {
+        _urlNote.Text = note;
+        if (_device != null && _url.Text.Length == 0) _url.Text = CustomUrls.GetValueOrDefault(_device.Ip.ToString()) ?? $"rtsp://{_device.Ip}:554/";
+        _urlRow.Visible = true;
     }
 
     private void AskLogin(string note)

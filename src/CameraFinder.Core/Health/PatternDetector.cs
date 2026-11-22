@@ -109,8 +109,8 @@ public static class PatternDetector
             }
         }
         f.Add(new Finding("packet-loss", sev, $"Packets are being lost ({p.LossPercent:0.#}%)",
-            $"{p.Sent - p.Received} of {p.Sent} pings got no reply; the loss is {where}. " +
-            "Video uses a lot of bandwidth, so loss like this shows up as smearing, grey blocks or recordings with gaps.",
+            $"{p.Sent - p.Received} of {p.Sent} pings got no reply; the loss is {where}." +
+            (s.IsCamera ? " Video uses a lot of bandwidth, so loss like this shows up as smearing, grey blocks or recordings with gaps." : ""),
             advice));
     }
 
