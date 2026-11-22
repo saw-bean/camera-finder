@@ -19,6 +19,13 @@ internal static class Program
         // Hidden: --screenshot <folder> runs a demo scan and saves screenshots of the windows (used to check the UI in CI).
         int i = Array.IndexOf(args, "--screenshot");
         string? shots = i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
+        if (shots != null)
+        {
+            // In the CI smoke test nobody can click an error dialog away: write errors to a file and carry on.
+            Directory.CreateDirectory(shots);
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (_, e) => File.AppendAllText(Path.Combine(shots, "ui-errors.txt"), e.Exception + Environment.NewLine + Environment.NewLine);
+        }
         Application.Run(new MainForm { ScreenshotFolder = shots });
     }
 }

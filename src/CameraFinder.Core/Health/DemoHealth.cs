@@ -13,7 +13,7 @@ namespace CameraFinder.Core.Health;
 ///   172.16.8.30   Wisenet   - SD card failing; key frames 8 s apart
 ///   others                  - healthy
 /// </summary>
-public sealed class DemoHealth : IPinger, IHopProber, IOnvifClient, IStreamProber
+public sealed class DemoHealth : IPinger, IHopProber, IOnvifClient, IStreamProber, ILiveStreamSource
 {
     private readonly DemoSite _site;
     private readonly Random _rnd = new(7);
@@ -78,7 +78,9 @@ public sealed class DemoHealth : IPinger, IHopProber, IOnvifClient, IStreamProbe
         double fps = ip == "172.16.8.30" ? 30 : 25;
         report.Profiles.Add(new OnvifProfile("Profile_1", "MainStream", "H264", 2688, 1520, fps, 6144));
         report.Profiles.Add(new OnvifProfile("Profile_2", "SubStream", "H264", 640, 360, 15, 512));
-        report.StreamUri = $"rtsp://{ip}:554/demo/main";
+        report.StreamUris["Profile_1"] = $"rtsp://{ip}:554/demo/main";
+        report.StreamUris["Profile_2"] = $"rtsp://{ip}:554/demo/sub";
+        report.StreamUri = report.StreamUris["Profile_1"];
         return report;
     }
 
@@ -127,5 +129,43 @@ public sealed class DemoHealth : IPinger, IHopProber, IOnvifClient, IStreamProbe
         };
         r.Frames = (int)(r.MeasuredFps.Value * r.SecondsWatched);
         return r;
+    }
+
+    // ---- live bandwidth: a believable per-second bitrate, with a spike on every key frame
+
+    /// <summary>Seconds per simulated second (tests run faster).</summary>
+    public TimeSpan Tick { get; init; } = TimeSpan.FromSeconds(1);
+
+    public async Task RunAsync(string url, Credentials? login, IPAddress? source, LiveStats stats, Action<LiveSample> onSecond, CancellationToken ct)
+    {
+        await Task.Delay(300, ct);
+        string ip = Uri.TryCreate(url, UriKind.Absolute, out var u) ? u.Host : "";
+        if (!IPAddress.TryParse(ip, out var addr) || !Reachable(addr)) throw new LiveStreamException("Connection timed out");
+        if (login is not { IsEmpty: false }) throw new LiveStreamException("401 Unauthorized: the stream needs a login", loginRefused: true);
+        bool sub = url.EndsWith("/sub");
+        stats.Codec = "H264";
+        double baseKbps = sub ? 480 : ip switch { LossyDevice => 3600, "172.16.8.30" => 4800, _ => 5600 };
+        int fps = sub ? 15 : ip == "172.16.8.30" ? 30 : 25;
+        int gop = ip == "172.16.8.30" ? 8 : 2;
+        var start = DateTime.UtcNow; // simulated clock: one tick is one second of video
+        for (int t = 0; !ct.IsCancellationRequested; t++)
+        {
+            await Task.Delay(Tick, ct);
+            bool key = t % gop == 0;
+            int frames = fps, lost = 0;
+            double kbps = baseKbps * (0.85 + Next(0, 30) / 100.0) * (key ? 1.6 : 1.0);
+            if (ip == LossyDevice && !sub)
+            {
+                frames = Next(14, 22);
+                lost = Next(3, 25);
+                kbps *= frames / (double)fps;
+                if (Next(0, 10) == 0) { frames = 0; kbps = 0; stats.AddGap(1900); }
+            }
+            if (key) stats.AddKeyFrame(start.AddSeconds(t));
+            stats.AddPackets(Math.Max(1, (int)(kbps / 10)), lost);
+            var sample = new LiveSample(DateTime.Now, kbps, frames, key, lost);
+            stats.Add(sample);
+            onSecond(sample);
+        }
     }
 }

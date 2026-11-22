@@ -71,14 +71,17 @@ public sealed class OnvifClient : IOnvifClient
 
         var profiles = await CallAsync(http, media, "<trt:GetProfiles xmlns:trt=\"http://www.onvif.org/ver10/media/wsdl\"/>", login, clock, ct);
         if (profiles.Doc != null) report.Profiles.AddRange(ReadProfiles(profiles.Doc));
-        var first = report.Profiles.FirstOrDefault();
-        if (first == null) { report.Unsupported.Add("The camera reported no video profiles over ONVIF"); return report; }
+        if (report.Profiles.Count == 0) { report.Unsupported.Add("The camera reported no video profiles over ONVIF"); return report; }
 
-        var uri = await CallAsync(http, media,
-            "<trt:GetStreamUri xmlns:trt=\"http://www.onvif.org/ver10/media/wsdl\" xmlns:tt=\"http://www.onvif.org/ver10/schema\">" +
-            "<trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream><tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup>" +
-            $"<trt:ProfileToken>{SecurityElement(first.Token)}</trt:ProfileToken></trt:GetStreamUri>", login, clock, ct);
-        report.StreamUri = uri.Doc == null ? null : Text(uri.Doc, "Uri");
+        foreach (var profile in report.Profiles.Take(3)) // main, sub and third stream are plenty
+        {
+            var uri = await CallAsync(http, media,
+                "<trt:GetStreamUri xmlns:trt=\"http://www.onvif.org/ver10/media/wsdl\" xmlns:tt=\"http://www.onvif.org/ver10/schema\">" +
+                "<trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream><tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup>" +
+                $"<trt:ProfileToken>{SecurityElement(profile.Token)}</trt:ProfileToken></trt:GetStreamUri>", login, clock, ct);
+            if (uri.Doc != null && Text(uri.Doc, "Uri") is { } u) report.StreamUris.TryAdd(profile.Token, u);
+        }
+        report.StreamUri = report.StreamUris.GetValueOrDefault(report.Profiles[0].Token) ?? report.StreamUris.Values.FirstOrDefault();
         return report;
     }
 

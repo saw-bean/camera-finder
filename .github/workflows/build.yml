@@ -52,6 +52,25 @@ jobs:
           -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
           -p:Version=${{ steps.ver.outputs.version }} -o publish
 
+      - name: UI smoke test (demo run, screenshots of every window)
+        # Runs the app's hidden --screenshot mode on the demo site in both themes. Fails the build if a window throws.
+        shell: pwsh
+        run: |
+          foreach ($theme in 'light', 'dark') {
+            $env:CAMERAFINDER_THEME = $theme
+            $p = Start-Process publish\CameraFinder.exe -ArgumentList '--screenshot', "$pwd\shots" -PassThru
+            if (-not $p.WaitForExit(240000)) { $p.Kill(); throw "UI smoke test ($theme) did not finish in 4 minutes" }
+          }
+          Get-ChildItem shots | Format-Table Name, Length
+          if (Test-Path shots\*error*.txt) { Get-Content shots\*error*.txt; throw "UI errors during the smoke test" }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots
+          path: shots
+          if-no-files-found: ignore
+
       - name: Bundle ffprobe and iperf3 (hash-checked)
         shell: pwsh
         run: ./tools/fetch-tools.ps1 -Destination publish/tools

@@ -26,11 +26,7 @@ public sealed class MainForm : Form
     private readonly FluentListView _list = new() { MultiSelect = false, Dock = DockStyle.Fill, HideSelection = false };
 
     private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, BackColor = SystemColors.Window };
-    private readonly FluentButton _open = Btn("Open web page", enabled: false);
-    private readonly FluentButton _ping = Btn("Ping", enabled: false);
-    private readonly FluentButton _copy = Btn("Copy IP", enabled: false);
-    private readonly FluentButton _health = Btn("Health check", enabled: false);
-    private readonly FluentButton _trace = Btn("Trace", enabled: false);
+    private readonly DevicePanel _panel = new();
     private readonly FluentButton _speed = Btn("Speed test…");
     private readonly CredentialStore _logins = new();
     private readonly FluentButton _export = Btn("Export CSV…");
@@ -64,9 +60,9 @@ public sealed class MainForm : Form
     public MainForm()
     {
         Text = $"Camera Finder {UpdateChecker.CurrentVersion.ToString(3)}";
-        Width = 1000;
-        Height = 680;
-        MinimumSize = new Size(780, 560);
+        Width = 1320;
+        Height = 780;
+        MinimumSize = new Size(1000, 600);
         StartPosition = FormStartPosition.CenterScreen;
         Font = Theme.Body;
         using (var ico = typeof(MainForm).Assembly.GetManifestResourceStream("CameraFinder.App.app.ico"))
@@ -140,11 +136,6 @@ public sealed class MainForm : Form
         tips.SetToolTip(_safeMode, "Safe mode: only listen and send discovery requests. Never adds IP addresses to the laptop and never sweeps. " +
             "Use on sensitive client networks.");
         tips.SetToolTip(_demo, "Scans a simulated site with cameras in several IP ranges. Sends nothing and changes nothing - for testing and training.");
-        tips.SetToolTip(_ping, "Ping the selected device continuously (like ping -t). Shows when it goes down and comes back.");
-        tips.SetToolTip(_open, "Open the selected device's web page. If it is in another IP range, a temporary IP is added first.");
-        tips.SetToolTip(_health, "Check the selected camera's health: ping, path, ONVIF (clock, log, video settings) and its video stream, " +
-            "then explain in plain words what is wrong and what to try.");
-        tips.SetToolTip(_trace, "Trace the path to the selected device like mtr: every router on the way, with loss and delay per hop, updated every second.");
         tips.SetToolTip(_speed, "Run a bandwidth test server (iperf3) on this laptop, for an iperf3 client at the other end of a cable run.");
         tips.SetToolTip(_removeIps, "Remove the temporary IP addresses this app added to the laptop.");
         tips.SetToolTip(_refresh, "Reload the list of network adapters.");
@@ -171,21 +162,26 @@ public sealed class MainForm : Form
         logCard.Controls.Add(logTitle, 0, 0);
         logCard.Controls.Add(_log, 0, 1);
 
+        // Card 4 - the selected device: filled in automatically (health, live bandwidth, video, web page).
+        var deviceCard = new FluentCard { Dock = DockStyle.Fill, RowCount = 1, Padding = new Padding(2) };
+        deviceCard.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        deviceCard.Controls.Add(_panel, 0, 0);
+        var listAndDevice = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterWidth = 10, FixedPanel = FixedPanel.Panel2 };
+        listAndDevice.Panel1.Controls.Add(devicesCard);
+        listAndDevice.Panel2.Controls.Add(deviceCard);
+
         var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterWidth = 10 };
-        split.Panel1.Controls.Add(devicesCard);
+        split.Panel1.Controls.Add(listAndDevice);
         split.Panel2.Controls.Add(logCard);
         var gap = new Panel { Dock = DockStyle.Top, Height = 10 };
 
-        // Command bar: device actions on the left, list/laptop actions on the right.
+        // Command bar: list/laptop actions (device actions are in the device panel).
         var bottom = new TableLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, ColumnCount = 2, RowCount = 1, Padding = new Padding(0, 8, 0, 4) };
         bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        var deviceButtons = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Dock = DockStyle.Fill, Margin = Padding.Empty };
-        _open.Primary = true;
-        deviceButtons.Controls.AddRange(new Control[] { _open, _health, _ping, _trace, _copy });
         var listButtons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = Padding.Empty };
         listButtons.Controls.AddRange(new Control[] { _speed, _export, _removeIps });
-        bottom.Controls.Add(deviceButtons, 0, 0);
+        bottom.Controls.Add(new Panel { Height = 1, Dock = DockStyle.Fill }, 0, 0);
         bottom.Controls.Add(listButtons, 1, 0);
 
         var statusStrip = new StatusStrip { ShowItemToolTips = true, Padding = new Padding(0, 2, 0, 2) };
@@ -203,7 +199,13 @@ public sealed class MainForm : Form
         Controls.Add(statusStrip);
 
         Theme.Apply(this);
-        Load += (_, _) => { split.SplitterDistance = (int)(split.Height * 0.66); FitColumns(); };
+        _panel.ApplyTheme();
+        Load += (_, _) =>
+        {
+            split.SplitterDistance = (int)(split.Height * 0.78);
+            listAndDevice.SplitterDistance = Math.Max(300, listAndDevice.Width - 470);
+            FitColumns();
+        };
     }
 
     private void UpdateDeviceCount()
@@ -232,14 +234,16 @@ public sealed class MainForm : Form
             await Task.Delay(700);
             Snap(this, Path.Combine(folder, $"{theme}-3-results.png"));
 
+            await Task.Delay(15000); // the device panel checks the selected camera on its own: health, live bandwidth, video
+            Snap(this, Path.Combine(folder, $"{theme}-3b-device-panel.png"));
+
             await PingSelectedAsync();
             await Task.Delay(5000);
             if (OwnedForms.LastOrDefault() is { } ping) { Snap(ping, Path.Combine(folder, $"{theme}-4-ping.png")); ping.Close(); }
 
             if (_engine?.Devices.FirstOrDefault(d => d.Ip.ToString() == "192.168.1.108") is { } dahua) SelectRow(dahua);
-            await HealthSelectedAsync();
-            await Task.Delay(12000); // demo check: pings, trace, ONVIF and a short "video" watch
-            if (OwnedForms.LastOrDefault() is { } health) { Snap(health, Path.Combine(folder, $"{theme}-6-health.png")); health.Close(); }
+            await Task.Delay(15000);
+            Snap(this, Path.Combine(folder, $"{theme}-6-restart-loop.png"));
             await TraceSelectedAsync();
             await Task.Delay(4000);
             if (OwnedForms.LastOrDefault() is { } trace) { Snap(trace, Path.Combine(folder, $"{theme}-7-trace.png")); trace.Close(); }
@@ -290,16 +294,9 @@ public sealed class MainForm : Form
         _list.SelectedIndexChanged += (_, _) => UpdateButtons();
         _list.DoubleClick += async (_, _) => await OpenSelectedAsync();
         _list.ColumnClick += (_, e) => Sort(e.Column);
-        _open.Click += async (_, _) => await OpenSelectedAsync();
-        _copy.Click += (_, _) =>
-        {
-            if (Selected() is not { } d) return;
-            try { Clipboard.SetText(d.Ip.ToString()); }
-            catch (Exception ex) { AppendLog("Could not copy to the clipboard: " + ex.Message); } // clipboard held by another app
-        };
-        _ping.Click += async (_, _) => await PingSelectedAsync();
-        _health.Click += async (_, _) => await HealthSelectedAsync();
-        _trace.Click += async (_, _) => await TraceSelectedAsync();
+        _panel.OpenWebPage += async _ => await OpenSelectedAsync();
+        _panel.PingRequested += async (_, _) => await PingSelectedAsync();
+        _panel.TraceRequested += async (_, _) => await TraceSelectedAsync();
         _speed.Click += (_, _) => new SpeedTestWindow(this).Show(this);
         _export.Click += (_, _) => Export();
         _removeIps.Click += (_, _) => RemoveTemporaryAddresses();
@@ -404,6 +401,7 @@ public sealed class MainForm : Form
                 async (d, ct) => { using var enricher = new DeviceEnricher(); await enricher.EnrichAsync(d, null, ct); });
         }
 
+        _panel.Tools = CreateDeviceTools();
         _list.Items.Clear();
         UpdateDeviceCount();
         _rows.Clear();
@@ -487,14 +485,37 @@ public sealed class MainForm : Form
 
     private Device? Selected() => _list.SelectedItems.Count == 1 ? _list.SelectedItems[0].Tag as Device : null;
 
-    private void UpdateButtons()
+    /// <summary>Shows the selected device in the device panel, which checks it automatically.</summary>
+    private void UpdateButtons() => _panel.ShowDevice(Selected(), scanning: _stop.Enabled);
+
+    /// <summary>How the device panel reaches and checks devices during this scan: the real network, or the demo site.</summary>
+    private DeviceTools CreateDeviceTools()
     {
-        var d = Selected();
-        _open.Enabled = d != null && !_opening;
-        _copy.Enabled = d != null;
-        _ping.Enabled = d != null && !_opening;
-        _health.Enabled = d != null && !_opening;
-        _trace.Enabled = d != null && !_opening;
+        async Task<WebPageResult> Reach(Device d, bool mayJoin)
+        {
+            if (_web == null || _engine == null) return new WebPageResult(WebPageStatus.JoinFailed);
+            var avoid = _engine.Devices.Select(x => x.Ip).ToHashSet();
+            return await _web.EnsureReachableAsync(d.Ip, mayJoin, avoid, CancellationToken.None);
+        }
+        if (_demoSite is { } site)
+        {
+            var demo = new DemoHealth(site);
+            return new DeviceTools
+            {
+                Reach = Reach, IsTemporary = _ => false, Health = () => new HealthCheck(demo, demo, demo, demo), Live = demo,
+                DemoLogin = new Credentials("admin", "demo"), SafeMode = () => _safeMode.Checked, Log = AppendLog,
+            };
+        }
+        return new DeviceTools
+        {
+            Reach = Reach,
+            IsTemporary = ip => ip != null && _temp.Added.Any(a => a.Ip == ip.ToString()),
+            Health = HealthCheck.CreateDefault,
+            Live = new RtspLiveSource(),
+            Store = _logins,
+            SafeMode = () => _safeMode.Checked,
+            Log = AppendLog,
+        };
     }
 
     /// <summary>
@@ -572,7 +593,7 @@ public sealed class MainForm : Form
     private async Task<Reachable?> ReachSelectedAsync(string action)
     {
         var d = Selected();
-        if (d == null || _opening) return null;
+        if (d == null) return null; // OpenToolAsync has already set _opening: do not check it here
         if (_web == null || _engine == null) { AppendLog("Run a scan first."); return null; }
         if (_stop.Enabled) await StopScanAsync($"Stopping the scan to {action.ToLowerInvariant()} {d.Ip}…");
 
@@ -627,17 +648,6 @@ public sealed class MainForm : Form
     /// <summary>mtr-style trace window for the selected device.</summary>
     private Task TraceSelectedAsync() => OpenToolAsync("Trace", r =>
         new TraceWindow(_demoSite != null ? new DemoHealth(_demoSite) : new IcmpHopProber(), r.Device.Ip, r.Source, r.Device.Description, this));
-
-    /// <summary>Health check window for the selected device. The demo site has its own simulated cameras, logs and streams.</summary>
-    private Task HealthSelectedAsync() => OpenToolAsync("Health check", r =>
-    {
-        if (_demoSite != null)
-        {
-            var demo = new DemoHealth(_demoSite);
-            return new HealthWindow(r.Device, new HealthCheck(demo, demo, demo, demo), r.Source, false, null, new Credentials("admin", "demo"), this);
-        }
-        return new HealthWindow(r.Device, HealthCheck.CreateDefault(), r.Source, r.Temporary, _logins, null, this);
-    });
 
     /// <summary>
     /// Opens a URL in the user's normal browser. Launching through explorer.exe means the browser does not
@@ -710,6 +720,7 @@ public sealed class MainForm : Form
         _removeIps.Enabled = !scanning;
         if (!scanning) _progress.Value = 0;
         _progress.Visible = scanning;
+        if (!scanning) _panel.ScanFinished();
     }
 
     /// <summary>The device the user is looking for has appeared: stop the scan, keep the list, select it.</summary>
