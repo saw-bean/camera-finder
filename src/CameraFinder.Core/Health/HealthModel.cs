@@ -1,4 +1,5 @@
 using System.Net;
+using CameraFinder.Core.Net;
 
 namespace CameraFinder.Core.Health;
 
@@ -30,7 +31,34 @@ public sealed record PingSample(int Sent, int Received, IReadOnlyList<long> Roun
 }
 
 /// <summary>One video profile as the camera reports it over ONVIF.</summary>
-public sealed record OnvifProfile(string Token, string? Name, string? Encoding, int? Width, int? Height, double? FrameRate, int? BitrateKbps);
+/// <param name="GovLength">Configured I-frame (key frame) interval, in frames.</param>
+public sealed record OnvifProfile(string Token, string? Name, string? Encoding, int? Width, int? Height, double? FrameRate, int? BitrateKbps, int? GovLength = null)
+{
+    /// <summary>Configured seconds between key frames, when both the interval and the frame rate are known.</summary>
+    public double? KeyframeSeconds => GovLength is > 0 && FrameRate is > 0 ? GovLength / FrameRate : null;
+}
+
+/// <summary>The camera's own network settings, read over ONVIF (needs a login).</summary>
+public sealed class OnvifNetwork
+{
+    public IPAddress? Address { get; set; }
+    public int? Prefix { get; set; }
+    /// <summary>The camera gets its address from DHCP.</summary>
+    public bool? Dhcp { get; set; }
+    public List<IPAddress> Gateways { get; } = new();
+    /// <summary>NTP servers (addresses or names) the camera is set to use.</summary>
+    public List<string> NtpServers { get; } = new();
+    public bool? NtpFromDhcp { get; set; }
+    /// <summary>Link the camera's own network port negotiated (OperSettings), Mbit/s.</summary>
+    public int? LinkSpeedMbps { get; set; }
+    /// <summary>"full" / "half".</summary>
+    public string? Duplex { get; set; }
+    /// <summary>False when speed/duplex is forced in the camera's settings.</summary>
+    public bool? AutoNegotiation { get; set; }
+    public int? Mtu { get; set; }
+
+    public Subnet? Subnet => Address != null && Prefix is >= 1 and <= 32 ? Net.Subnet.Of(Address, Prefix.Value) : null;
+}
 
 /// <summary>What the camera answered over ONVIF. Fields stay null when the camera did not answer that request.</summary>
 public sealed class OnvifReport
@@ -61,6 +89,13 @@ public sealed class OnvifReport
     public string? StreamUri { get; set; }
     /// <summary>RTSP address per profile token (main, sub, third stream...).</summary>
     public Dictionary<string, string> StreamUris { get; } = new();
+
+    /// <summary>The camera's network settings (null when not read).</summary>
+    public OnvifNetwork? Network { get; set; }
+    /// <summary>Protocols the camera says it serves: name (HTTP, HTTPS, RTSP) -> (enabled, first port).</summary>
+    public Dictionary<string, (bool Enabled, int? Port)> Protocols { get; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The login works but its user level is too low for some requests (e.g. the system log).</summary>
+    public bool LoginLevelTooLow { get; set; }
 
     /// <summary>Requests the camera did not support or refused, in plain words.</summary>
     public List<string> Unsupported { get; } = new();

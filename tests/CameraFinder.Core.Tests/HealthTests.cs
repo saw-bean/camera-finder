@@ -269,6 +269,12 @@ static partial class Tests
                         _ when req.Contains("GetSystemLog") => "<Envelope><Body><GetSystemLogResponse><SystemLog><String>2026-03-02 08:00:00 System Reboot&#10;2026-03-02 08:05:00 Illegal login, IP: 10.1.1.1</String></SystemLog></GetSystemLogResponse></Body></Envelope>",
                         _ when req.Contains("GetCapabilities") => $"<Envelope><Body><GetCapabilitiesResponse><Capabilities><Media><XAddr>http://1.2.3.4/onvif/media</XAddr></Media></Capabilities></GetCapabilitiesResponse></Body></Envelope>",
                         _ when req.Contains("GetProfiles") => ProfilesReply,
+                        _ when req.Contains("GetNetworkInterfaces") => NetworkInterfacesReply,
+                        _ when req.Contains("GetNetworkDefaultGateway") => "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\" xmlns:tt=\"http://www.onvif.org/ver10/schema\" xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\"><s:Body><tds:GetNetworkDefaultGatewayResponse><tds:NetworkGateway><tt:IPv4Address>192.168.0.1</tt:IPv4Address></tds:NetworkGateway></tds:GetNetworkDefaultGatewayResponse></s:Body></s:Envelope>",
+                        _ when req.Contains("GetNTP") => "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\" xmlns:tt=\"http://www.onvif.org/ver10/schema\" xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\"><s:Body><tds:GetNTPResponse><tds:NTPInformation><tt:FromDHCP>false</tt:FromDHCP><tt:NTPManual><tt:Type>DNS</tt:Type><tt:DNSname>time.windows.com</tt:DNSname></tt:NTPManual></tds:NTPInformation></tds:GetNTPResponse></s:Body></s:Envelope>",
+                        _ when req.Contains("GetNetworkProtocols") => "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\" xmlns:tt=\"http://www.onvif.org/ver10/schema\" xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\"><s:Body><tds:GetNetworkProtocolsResponse>" +
+                            "<tds:NetworkProtocols><tt:Name>HTTP</tt:Name><tt:Enabled>true</tt:Enabled><tt:Port>80</tt:Port></tds:NetworkProtocols>" +
+                            "<tds:NetworkProtocols><tt:Name>RTSP</tt:Name><tt:Enabled>true</tt:Enabled><tt:Port>8554</tt:Port></tds:NetworkProtocols></tds:GetNetworkProtocolsResponse></s:Body></s:Envelope>",
                         _ when req.Contains("GetStreamUri") => "<Envelope><Body><GetStreamUriResponse><MediaUri><Uri>rtsp://1.2.3.4:554/main</Uri></MediaUri></GetStreamUriResponse></Body></Envelope>",
                         _ => null!,
                     };
@@ -290,6 +296,17 @@ static partial class Tests
         Assert.Equal(2, report.Profiles.Count);
         Assert.Equal("rtsp://1.2.3.4:554/main", report.StreamUri);
         Assert.Equal(2, report.StreamUris.Count); // main and sub profile
+        // The camera's own network settings: a 1.2.3.4/24 camera whose gateway is in another range, with a time server name.
+        var net = report.Network!;
+        Assert.Equal("10.1.5.20", net.Address!.ToString());
+        Assert.Equal(24, net.Prefix);
+        Assert.Equal(false, net.Dhcp);
+        Assert.Equal("192.168.0.1", net.Gateways.Single().ToString());
+        Assert.Equal("time.windows.com", net.NtpServers.Single());
+        Assert.Equal(100, net.LinkSpeedMbps);
+        Assert.Equal("half", net.Duplex);
+        Assert.Equal(false, net.AutoNegotiation);
+        Assert.Equal((true, (int?)8554), report.Protocols["rtsp"]);
         lock (seen)
         {
             Assert.True(seen.Count >= 6, "requests: " + seen.Count);
@@ -323,6 +340,52 @@ static partial class Tests
         web.Stop();
         try { await webTask; } catch { }
         Assert.True(!notOnvif.Answered, "a web page is not an ONVIF answer");
+    }
+
+    // GetNetworkInterfaces as a Hikvision answers it (namespaced, with Link settings), forced to 100 Mbit/s half duplex.
+    private const string NetworkInterfacesReply =
+        "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\" xmlns:tt=\"http://www.onvif.org/ver10/schema\" xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\"><s:Body>" +
+        "<tds:GetNetworkInterfacesResponse><tds:NetworkInterfaces token=\"eth0\"><tt:Enabled>true</tt:Enabled>" +
+        "<tt:Info><tt:Name>eth0</tt:Name><tt:HwAddress>44:19:b6:20:00:64</tt:HwAddress><tt:MTU>1500</tt:MTU></tt:Info>" +
+        "<tt:Link><tt:AdminSettings><tt:AutoNegotiation>false</tt:AutoNegotiation><tt:Speed>100</tt:Speed><tt:Duplex>Half</tt:Duplex></tt:AdminSettings>" +
+        "<tt:OperSettings><tt:AutoNegotiation>false</tt:AutoNegotiation><tt:Speed>100</tt:Speed><tt:Duplex>Half</tt:Duplex></tt:OperSettings><tt:InterfaceType>6</tt:InterfaceType></tt:Link>" +
+        "<tt:IPv4><tt:Enabled>true</tt:Enabled><tt:Config><tt:Manual><tt:Address>10.1.5.20</tt:Address><tt:PrefixLength>24</tt:PrefixLength></tt:Manual>" +
+        "<tt:DHCP>false</tt:DHCP></tt:Config></tt:IPv4></tds:NetworkInterfaces></tds:GetNetworkInterfacesResponse></s:Body></s:Envelope>";
+
+    public static void TestCameraSettingsFindings()
+    {
+        var o = new OnvifReport { Answered = true, LoginAccepted = true, TimeSource = "NTP",
+            CameraUtc = new DateTime(2026, 3, 2, 9, 0, 0, DateTimeKind.Utc), LaptopUtc = new DateTime(2026, 3, 2, 12, 0, 0, DateTimeKind.Utc) };
+        o.Network = OnvifClient.ReadNetworkInterfaces(OnvifClient.Load(NetworkInterfacesReply)!, IPAddress.Parse("10.1.5.20"));
+        o.Network!.Gateways.Add(IPAddress.Parse("192.168.0.1"));
+        o.Network.NtpServers.Add("time.windows.com");
+        o.Protocols["RTSP"] = (false, 554);
+        o.Profiles.Add(new OnvifProfile("p1", "main", "H264", 1920, 1080, 25, 4096, GovLength: 250));
+        var r = HealthCheck.Analyse(Snap(onvif: o));
+        var codes = r.Findings.Select(x => x.Code).ToList();
+        foreach (var c in new[] { "gateway-outside", "half-duplex", "rtsp-off", "long-gop", "clock" })
+            Assert.True(codes.Contains(c), c + " in " + string.Join(",", codes));
+        Assert.True(!codes.Contains("dhcp"), "static address");
+        Assert.True(r.Findings.First(x => x.Code == "half-duplex").Evidence.Contains("forced"), "says it is forced");
+        Assert.True(r.Findings.First(x => x.Code == "long-gop").Evidence.Contains("every 10 s"), r.Findings.First(x => x.Code == "long-gop").Evidence);
+        Assert.True(r.Findings.First(x => x.Code == "clock").Advice.Any(a => a.Contains("time.windows.com")), "clock advice names the unreachable time server");
+
+        // An IP time server outside the camera's range with no gateway can never be reached.
+        var n = new OnvifNetwork { Address = IPAddress.Parse("10.1.5.20"), Prefix = 24 };
+        n.NtpServers.Add("192.168.1.10");
+        Assert.True(PatternDetector.NtpReachProblem(n)!.Contains("no gateway"), "no gateway");
+        n.Gateways.Add(IPAddress.Parse("10.1.5.1"));
+        Assert.True(PatternDetector.NtpReachProblem(n) == null, "reachable through the gateway");
+
+        // With a managed switch, the switch port's view wins over the camera's own.
+        var withPort = Snap(onvif: o);
+        withPort.Port = new SwitchPortReport { Switch = new SwitchInfo(IPAddress.Parse("10.1.5.2"), "public", null, "sw", null), IfIndex = 3, SpeedMbps = 100, Duplex = "full" };
+        Assert.True(!HealthCheck.Analyse(withPort).Findings.Any(x => x.Code == "half-duplex"), "switch says full duplex");
+
+        // RTSP moved to another port: the brand's usual address uses that port.
+        var moved = new HealthSnapshot { Ip = IPAddress.Parse("10.1.5.20"), Vendor = "Hikvision", Onvif = new OnvifReport { Answered = true } };
+        moved.Onvif.Protocols["RTSP"] = (true, 8554);
+        Assert.Equal("rtsp://10.1.5.20:8554/Streaming/Channels/101", HealthCheck.StreamUrl(moved));
     }
 
     private static async Task<string> ReadHttpRequest(NetworkStream s, CancellationToken ct)
@@ -470,6 +533,8 @@ static partial class Tests
         var hik = await Check("192.168.1.64");
         var codes = hik.Findings.Select(f => f.Code).ToList();
         Assert.True(codes.Contains("failed-logins") && codes.Contains("locked") && codes.Contains("clock"), string.Join(",", codes));
+        Assert.True(hik.Findings.First(f => f.Code == "clock").Advice.Any(a => a.Contains("10.0.0.5") && a.Contains("no gateway")),
+            "the camera's own settings explain the slow clock: time server outside its network, no gateway");
 
         var noLogin = await check.RunAsync(new Device(IPAddress.Parse("192.168.1.64")), null, new HealthCheckOptions { PingCount = 2, PingInterval = TimeSpan.Zero, TraceRounds = 1, StreamWatch = TimeSpan.FromSeconds(1) }, null, CancellationToken.None);
         Assert.True(noLogin.Findings.Any(f => f.Code == "onvif-login"), "login needed");

@@ -10,10 +10,14 @@ using CameraFinder.Core.Net;
 
 // Minimal test runner: every public static method in Tests whose name starts with "Test" is a test.
 // Methods marked [Live] need real network access / capture rights and are skipped with --unit-only.
+// --only <Name> runs that one test (CI runs the real-network ones on their own).
 bool unitOnly = args.Contains("--unit-only");
+int onlyAt = Array.IndexOf(args, "--only");
+string? only = onlyAt >= 0 && onlyAt + 1 < args.Length ? args[onlyAt + 1] : null;
 int passed = 0, failed = 0, skipped = 0;
 foreach (var m in typeof(Tests).GetMethods(BindingFlags.Public | BindingFlags.Static).Where(m => m.Name.StartsWith("Test")))
 {
+    if (only != null && m.Name != only) continue;
     bool live = m.GetCustomAttribute<LiveAttribute>() != null;
     if (live && unitOnly) { skipped++; continue; }
     try
@@ -641,12 +645,13 @@ static partial class Tests
     sealed class SimJoiner : IAddressJoiner
     {
         public readonly List<Subnet> Joined = new();
-        public Task<IPAddress?> AddFreeAddressAsync(Adapter adapter, Subnet subnet, ISet<IPAddress> avoid, CancellationToken ct)
+        public Task<IPAddress?> AddFreeAddressAsync(Adapter adapter, Subnet subnet, ISet<IPAddress> avoid, CancellationToken ct, IPAddress? near = null)
         {
             lock (Joined) Joined.Add(subnet);
-            var ip = TempAddressManager.Candidates(subnet).First(c => !avoid.Contains(c));
+            var ip = TempAddressManager.Candidates(subnet, near).First(c => !avoid.Contains(c));
             return Task.FromResult<IPAddress?>(ip);
         }
+        public Task<IPAddress?> AddHostRouteAsync(Adapter adapter, IPAddress device, ISet<IPAddress> avoid, CancellationToken ct) => Task.FromResult<IPAddress?>(null);
     }
 
     sealed class SimArp(Dictionary<string, string> devices, Subnet? proxyRange = null) : IArpResolver
@@ -774,7 +779,8 @@ static partial class Tests
             Assert.Equal(dd.Camera ? DeviceKind.Camera : dd.Ports.Length > 0 ? DeviceKind.WebDevice : DeviceKind.Other, d.Kind, dd.Ip + " type");
         }
         Assert.True(engine.Devices.First(x => x.Ip.ToString() == "10.0.5.40").Sources.HasFlag(DiscoverySource.ArpSweep), "quiet camera found by sweep");
-        Assert.Equal(4, site.Joined.Count, "joined 10.0.5/24, 172.16.8/24, 192.0.0/24 and 169.254/16");
+        Assert.Equal(5, site.Joined.Count, "joined 10.0.5/24, 172.16.8/24, 192.0.0/24 and 169.254/16, plus one address for the public-IP camera");
+        Assert.True(site.Laptop.HostRoutes.Any(r => r.Device.ToString() == DemoSite.PublicCamera), "route to the public-IP camera");
         Assert.True(!engine.Devices.Any(d => site.Joined.Any(j => j.Address.Equals(d.Ip))), "temporary IPs not listed as devices");
         Assert.True(log.Any(l => l.Contains("Other ranges seen")), "range discovery logged");
         Assert.True(log.Any(l => l.Contains($"{DemoSite.Devices.Count(x => x.Camera)} camera(s)")), "camera count in final log:\n" + Dump());
@@ -810,7 +816,7 @@ static partial class Tests
         var ok = await web.PrepareAsync(axis, mayJoin: true, avoid, CancellationToken.None);
         Assert.Equal(WebPageStatus.Ready, ok.Status);
         Assert.Equal("http://10.0.5.21/", ok.Url);
-        Assert.Equal("10.0.5.251", ok.TemporaryAddress?.ToString(), "temporary IP at the top of the camera's range");
+        Assert.Equal("10.0.5.62", ok.TemporaryAddress?.ToString(), "temporary IP near the camera (top of its /26), inside its subnet whatever its mask");
         Assert.True(Reach.CanReach(site.Laptop.Addresses, axis.Ip), "laptop now in the camera's range");
         Assert.Equal(DeviceKind.Camera, axis.Kind, "details read after joining");
 
@@ -831,17 +837,19 @@ static partial class Tests
         var door = engine.Devices.First(d => d.Ip.ToString() == "10.0.5.60");
         Assert.Equal(WebPageStatus.NoWebPage, (await web.PrepareAsync(door, true, avoid, CancellationToken.None)).Status);
 
-        // Public address: never joined.
-        Assert.Equal(WebPageStatus.NotJoinable, (await web.PrepareAsync(new Device(IPAddress.Parse("8.8.8.8")), true, avoid, CancellationToken.None)).Status);
-        Assert.Equal(3, site.Joined.Count, "10.0.5/24, 192.0.0/24, 169.254/16");
+        // Public-looking address: reached through a route for that one device, never by taking over its range.
+        Assert.Equal(WebPageStatus.NoWebPage, (await web.PrepareAsync(new Device(IPAddress.Parse("8.8.8.8")), true, avoid, CancellationToken.None)).Status);
+        Assert.True(site.Laptop.HostRoutes.Any(r => r.Device.ToString() == "8.8.8.8") && !site.Joined.Any(j => j.Prefix == 24 && j.Address.ToString().StartsWith("8.8.8.")),
+            "one-device route, no /24");
+        Assert.Equal(4, site.Joined.Count, "10.0.5/24, 192.0.0/24, 169.254/16 and 8.8.8.x/32");
     }
 
     public static async Task TestOpenWebPageReportsJoinFailure()
     {
-        var web = new WebPageAccess(new NoJoin(), () => SimLaptop(), (_, _) => Task.CompletedTask);
+        var web = new WebPageAccess(new NoJoin(), () => SimLaptop(), (_, _, _) => Task.CompletedTask);
         var r = await web.PrepareAsync(new Device(IPAddress.Parse("10.9.9.9")), true, new HashSet<IPAddress>(), CancellationToken.None);
         Assert.Equal(WebPageStatus.JoinFailed, r.Status);
-        var noJoiner = new WebPageAccess(null, () => SimLaptop(), (_, _) => Task.CompletedTask);
+        var noJoiner = new WebPageAccess(null, () => SimLaptop(), (_, _, _) => Task.CompletedTask);
         Assert.Equal(WebPageStatus.JoinFailed, (await noJoiner.PrepareAsync(new Device(IPAddress.Parse("10.9.9.9")), true, new HashSet<IPAddress>(), CancellationToken.None)).Status);
     }
 
@@ -944,6 +952,50 @@ static partial class Tests
         Assert.True(withSource.Success, "loopback answers with explicit source: " + withSource.Status);
     }
 
+    public static void TestTempCandidatesStartNearTheDevice()
+    {
+        var c = TempAddressManager.Candidates(Subnet.Parse("192.168.1.0/24"), IPAddress.Parse("192.168.1.10")).Select(x => x.ToString()).ToList();
+        // Top of the /26 (.0-.63), then the /27 (.0-.31), then the /28 (.0-.15) around the device; then the usual top of the /24.
+        Assert.Equal("192.168.1.62,192.168.1.61,192.168.1.60,192.168.1.59,192.168.1.30,192.168.1.29,192.168.1.28,192.168.1.27,192.168.1.14,192.168.1.13,192.168.1.12,192.168.1.11,192.168.1.251",
+            string.Join(",", c.Take(13)));
+        foreach (var mask in new[] { 24, 25, 26, 27, 28 })
+        {
+            var own = Subnet.Of(IPAddress.Parse("192.168.1.10"), mask);
+            Assert.True(c.Take(4).Concat(c.Skip(4).Take(8)).Any(x => own.Contains(IPAddress.Parse(x))), $"a candidate inside the device's /{mask}");
+        }
+        Assert.True(!c.Contains("192.168.1.10"), "never the device itself");
+        Assert.True(c.Distinct().Count() == c.Count, "no repeats");
+        var high = TempAddressManager.Candidates(Subnet.Parse("10.0.5.0/24"), IPAddress.Parse("10.0.5.200")).First().ToString();
+        Assert.Equal("10.0.5.254", high, "device in the top /26: .254 is the top of that block");
+    }
+
+    public static async Task TestPublicIpDeviceGetsARouteOfItsOwn()
+    {
+        var site = FastDemo();
+        var web = new WebPageAccess(site, () => site.Laptop, site.ReadDetailsAsync);
+        var cam = new Device(IPAddress.Parse(DemoSite.PublicCamera));
+        Assert.True(Reach.NeedsHostRoute(cam.Ip) && !Reach.NeedsHostRoute(IPAddress.Parse("10.0.5.21")), "public vs private");
+
+        var ask = await web.PrepareAsync(cam, mayJoin: false, new HashSet<IPAddress>(), CancellationToken.None);
+        Assert.Equal(WebPageStatus.NeedsTemporaryAddress, ask.Status, "safe mode asks first");
+
+        var ok = await web.PrepareAsync(cam, mayJoin: true, new HashSet<IPAddress>(), CancellationToken.None);
+        Assert.Equal(WebPageStatus.Ready, ok.Status);
+        Assert.Equal("http://11.0.0.64/", ok.Url);
+        Assert.True(Subnet.Parse("11.0.0.0/24").Contains(ok.Source!), "source in the camera's /24: " + ok.Source);
+        Assert.True(site.Joined.Any(j => j.Address.Equals(ok.Source) && j.Prefix == 32), "the address covers only itself (/32)");
+        Assert.True(Reach.CanReach(site.Laptop, cam.Ip), "the camera is reachable");
+        Assert.True(!Reach.CanReach(site.Laptop, IPAddress.Parse("11.0.0.65")), "the rest of its range (the internet) is not");
+        var ping = await site.PingAsync(cam.Ip, ok.Source, TimeSpan.FromMilliseconds(20), CancellationToken.None);
+        Assert.True(ping.Success, "answers ping");
+
+        var again = await web.EnsureReachableAsync(cam.Ip, mayJoin: true, new HashSet<IPAddress>(), CancellationToken.None);
+        Assert.Equal(ok.Source, again.Source, "reused");
+        Assert.Equal(1, site.Joined.Count, "nothing more added");
+        var broadcast = await web.EnsureReachableAsync(IPAddress.Parse("255.255.255.255"), true, new HashSet<IPAddress>(), CancellationToken.None);
+        Assert.Equal(WebPageStatus.NotJoinable, broadcast.Status);
+    }
+
     public static async Task TestDemoPingNeedsTheDevicesRange()
     {
         var site = FastDemo();
@@ -954,7 +1006,7 @@ static partial class Tests
 
         var reach = await web.EnsureReachableAsync(axis, mayJoin: true, new HashSet<IPAddress>(), CancellationToken.None);
         Assert.Equal(WebPageStatus.Ready, reach.Status);
-        Assert.Equal("10.0.5.251", reach.Source?.ToString(), "ping source is the temporary IP");
+        Assert.Equal("10.0.5.62", reach.Source?.ToString(), "ping source is the temporary IP");
         var after = await site.PingAsync(axis, reach.Source, TimeSpan.FromMilliseconds(20), CancellationToken.None);
         Assert.True(after.Success && after.RoundTripMs is >= 1 and <= 4, "reply after joining");
 
@@ -965,7 +1017,8 @@ static partial class Tests
 
     sealed class NoJoin : IAddressJoiner
     {
-        public Task<IPAddress?> AddFreeAddressAsync(Adapter adapter, Subnet subnet, ISet<IPAddress> avoid, CancellationToken ct) => Task.FromResult<IPAddress?>(null);
+        public Task<IPAddress?> AddFreeAddressAsync(Adapter adapter, Subnet subnet, ISet<IPAddress> avoid, CancellationToken ct, IPAddress? near = null) => Task.FromResult<IPAddress?>(null);
+        public Task<IPAddress?> AddHostRouteAsync(Adapter adapter, IPAddress device, ISet<IPAddress> avoid, CancellationToken ct) => Task.FromResult<IPAddress?>(null);
     }
 
     // ---------- Live tests (real sockets / capture) ----------

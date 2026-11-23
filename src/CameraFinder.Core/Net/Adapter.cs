@@ -16,6 +16,12 @@ public sealed record Adapter(
     IReadOnlyList<(IPAddress Address, int Prefix)> Addresses,
     IReadOnlyList<IPAddress> Gateways)
 {
+    /// <summary>
+    /// Single devices reachable through a one-device route (devices in public ranges): the device and the laptop's
+    /// /32 address to send from. Added by <see cref="TempAddressManager"/>; empty for a freshly listed adapter.
+    /// </summary>
+    public IReadOnlyList<(IPAddress Device, IPAddress Source)> HostRoutes { get; init; } = Array.Empty<(IPAddress, IPAddress)>();
+
     public IEnumerable<Subnet> Subnets => Addresses.Select(a => Subnet.Of(a.Address, a.Prefix));
 
     public bool HasAddressIn(Subnet subnet) => Addresses.Any(a => subnet.Contains(a.Address));

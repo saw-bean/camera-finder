@@ -60,6 +60,13 @@ jobs:
       - name: Unit tests
         run: dotnet run --project tests/CameraFinder.Core.Tests -c Release -- --unit-only
 
+      - name: Real Windows network changes (virtual IP, web session, one-device route, crash clean-up)
+        env:
+          NETSH_TEST: "1"
+        run: |
+          dotnet run --project tests/CameraFinder.Core.Tests -c Release -- --only TestRealWindowsVirtualIpAndWebSession | Tee-Object -FilePath netsh.txt
+          if (-not (Select-String -Path netsh.txt -Pattern "PASS TestRealWindowsVirtualIpAndWebSession" -Quiet)) { exit 1 }
+
       - name: Version
         id: ver
         shell: pwsh

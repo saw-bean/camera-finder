@@ -189,6 +189,11 @@ public static class LogNormalizer
                         Math.Abs(off.TotalSeconds) < 5 ? "The camera's clock matches the laptop's"
                             : $"The camera's clock is {Span(off.Duration())} {(off > TimeSpan.Zero ? "ahead of" : "behind")} the laptop's" +
                               (o.TimeSource != null ? $" (time set by {(o.TimeSource.Equals("NTP", StringComparison.OrdinalIgnoreCase) ? "NTP" : "hand")})" : ""));
+                if (o.Network is { } net)
+                    yield return M("ONVIF", Severity.Info, "The camera's network settings: " + NetworkText(net));
+                if (o.Protocols.Count > 0)
+                    yield return M("ONVIF", Severity.Info, "Services: " + string.Join(", ",
+                        o.Protocols.Select(p => $"{p.Key} {(p.Value.Enabled ? $"on{(p.Value.Port is { } pt ? $" port {pt}" : "")}" : "off")}")));
                 foreach (var prof in o.Profiles.Take(3))
                     yield return M("ONVIF", Severity.Info, $"Video profile \"{prof.Name ?? prof.Token}\": {ProfileText(prof)}");
                 foreach (var u in o.Unsupported)
@@ -233,6 +238,18 @@ public static class LogNormalizer
             p.Width is { } w && p.Height is { } h ? $"{w}x{h}" : null,
             p.FrameRate is { } f ? $"{f:0.#} fps" : null,
             p.BitrateKbps is { } b ? $"up to {Mbps(b)}" : null,
+            p.KeyframeSeconds is { } k ? $"key frame every {k:0.#} s" : null,
+        }.Where(x => x != null));
+
+    /// <summary>"192.168.1.64/24, static, gateway 192.168.1.1, time server 192.168.1.10, link 100 Mbit/s full duplex".</summary>
+    public static string NetworkText(OnvifNetwork n) =>
+        string.Join(", ", new[]
+        {
+            n.Address != null ? $"{n.Address}/{n.Prefix?.ToString() ?? "?"}" : null,
+            n.Dhcp switch { true => "from DHCP", false => "static", _ => null },
+            n.Gateways.Count > 0 ? $"gateway {string.Join(" / ", n.Gateways)}" : "no gateway",
+            n.NtpServers.Count > 0 ? $"time server {string.Join(" / ", n.NtpServers)}" : "no time server",
+            n.LinkSpeedMbps is { } sp ? $"link {sp} Mbit/s{(n.Duplex != null ? $" {n.Duplex} duplex" : "")}{(n.AutoNegotiation == false ? " (forced)" : "")}" : null,
         }.Where(x => x != null));
 
     public static string Ms(double ms) => ms < 1 ? "under 1 ms" : $"{ms:0} ms";

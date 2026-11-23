@@ -55,9 +55,13 @@ public sealed class HealthCheck
     public static string? StreamUrl(HealthSnapshot s, string? profileToken = null)
     {
         string? url = (profileToken != null ? s.Onvif?.StreamUris.GetValueOrDefault(profileToken) : null)
-                      ?? s.Onvif?.StreamUri ?? RtspPaths.Guess(s.Ip.ToString(), s.Vendor, s.Description ?? s.Onvif?.Model);
+                      ?? s.Onvif?.StreamUri ?? RtspPaths.Guess(s.Ip.ToString(), s.Vendor, s.Description ?? s.Onvif?.Model, RtspPort(s));
         return url == null ? null : Repoint(url, s.Ip);
     }
+
+    /// <summary>The camera's RTSP port as it reported it over ONVIF, else 554.</summary>
+    public static int RtspPort(HealthSnapshot s) =>
+        s.Onvif?.Protocols.TryGetValue("RTSP", out var r) == true && r.Port is > 0 and < 65536 ? r.Port.Value : 554;
 
     /// <summary>The usual set-up: real ICMP and ONVIF, ffprobe from the tools folder if it is there.</summary>
     public static HealthCheck CreateDefault()
@@ -110,12 +114,10 @@ public sealed class HealthCheck
             string? url = StreamUrl(snap);
             if (url == null)
                 snap.NotChecked.Add("Video stream not checked: the camera did not report its stream address over ONVIF and its brand is not known.");
-            else if (options.SourceIsTemporary)
-                snap.NotChecked.Add("Video stream not checked: the camera is in another IP range, and ffprobe can only connect from the laptop's main address. Set an IP in that range on the laptop to check video.");
             else
             {
                 progress?.Report($"Watching the video stream for {options.StreamWatch.TotalSeconds:0} seconds…");
-                try { snap.Stream = await _stream.ProbeAsync(url, options.Login, options.StreamWatch, ct); }
+                try { snap.Stream = await _stream.ProbeAsync(url, options.Login, options.StreamWatch, ct, options.SourceIsTemporary ? source : null); }
                 catch (Exception ex) when (ex is not OperationCanceledException) { snap.NotChecked.Add("Video stream not checked: " + ex.Message); }
             }
         }

@@ -32,9 +32,13 @@ public sealed class DemoSite : IPassiveCapture, IArpResolver, IAddressJoiner, IP
         new DemoDevice("172.16.8.30", "00:09:18:60:08:30", "XNV-6080R", "Wisenet", new[] { 80, 443, 554 }, true),
         new DemoDevice("192.0.0.64", "44:19:B6:70:00:64", "DS-2CD1043G0-I (NOT ACTIVATED)", "Hikvision - activate device", new[] { 80, 554, 8000 }, true, Heard: true),
         new DemoDevice("169.254.12.34", "00:40:8C:80:12:34", "AXIS M3106-L Mk II", "AXIS", new[] { 80 }, true, Heard: true),
+        // An installer gave this one a public-looking address on the closed camera network: reached through a one-device route.
+        new DemoDevice(PublicCamera, "44:19:B6:90:00:64", "DS-2DE4425IW-DE (PTZ)", "Hikvision", new[] { 80, 554, 8000 }, true, Heard: true),
     };
 
     public static readonly IPAddress LaptopAddress = IPAddress.Parse("192.168.1.50");
+    public const string PublicCamera = "11.0.0.64";
+    private readonly List<(IPAddress Device, IPAddress Source)> _hostRoutes = new();
 
     private readonly Dictionary<string, DemoDevice> _byIp = Devices.ToDictionary(d => d.Ip);
     private readonly List<(IPAddress Address, int Prefix)> _joined = new();
@@ -56,8 +60,10 @@ public sealed class DemoSite : IPassiveCapture, IArpResolver, IAddressJoiner, IP
         {
             var addresses = new List<(IPAddress, int)> { (LaptopAddress, 24) };
             addresses.AddRange(Joined);
+            List<(IPAddress, IPAddress)> routes;
+            lock (_lock) routes = _hostRoutes.ToList();
             return new Adapter("demo", "Demo network", "Demo site (simulated)", 0, "02:00:00:00:00:50", true, true,
-                addresses, new List<IPAddress> { IPAddress.Parse("192.168.1.1") });
+                addresses, new List<IPAddress> { IPAddress.Parse("192.168.1.1") }) { HostRoutes = routes };
         }
     }
 
@@ -103,16 +109,31 @@ public sealed class DemoSite : IPassiveCapture, IArpResolver, IAddressJoiner, IP
 
     // ---- IAddressJoiner: "adds" the temporary address without touching the laptop.
 
-    public async Task<IPAddress?> AddFreeAddressAsync(Adapter adapter, Subnet subnet, ISet<IPAddress> avoid, CancellationToken ct)
+    public async Task<IPAddress?> AddFreeAddressAsync(Adapter adapter, Subnet subnet, ISet<IPAddress> avoid, CancellationToken ct, IPAddress? near = null)
     {
         if (JoinDelay > TimeSpan.Zero) await Task.Delay(JoinDelay, ct);
         lock (_lock)
         {
             var existing = _joined.FirstOrDefault(j => subnet.Contains(j.Address));
             if (existing.Address != null) return existing.Address;
-            var ip = TempAddressManager.Candidates(subnet).FirstOrDefault(c => !avoid.Contains(c) && !_byIp.ContainsKey(c.ToString()));
+            var ip = TempAddressManager.Candidates(subnet, near).FirstOrDefault(c => !avoid.Contains(c) && !_byIp.ContainsKey(c.ToString()));
             if (ip != null) _joined.Add((ip, subnet.Prefix));
             return ip;
+        }
+    }
+
+    public async Task<IPAddress?> AddHostRouteAsync(Adapter adapter, IPAddress device, ISet<IPAddress> avoid, CancellationToken ct)
+    {
+        if (JoinDelay > TimeSpan.Zero) await Task.Delay(JoinDelay, ct);
+        lock (_lock)
+        {
+            var block = Subnet.Of(device, 24);
+            var source = _joined.FirstOrDefault(j => j.Prefix == 32 && block.Contains(j.Address)).Address
+                ?? TempAddressManager.Candidates(block, device).FirstOrDefault(c => !avoid.Contains(c) && !_byIp.ContainsKey(c.ToString()));
+            if (source == null) return null;
+            if (!_joined.Contains((source, 32))) _joined.Add((source, 32));
+            if (!_hostRoutes.Any(r => r.Device.Equals(device))) _hostRoutes.Add((device, source));
+            return source;
         }
     }
 
@@ -126,7 +147,7 @@ public sealed class DemoSite : IPassiveCapture, IArpResolver, IAddressJoiner, IP
     {
         await Task.Delay(TimeSpan.FromMilliseconds(5), ct);
         bool rebooting = target.ToString() == RebootingDevice && DateTime.UtcNow.Second is >= 30 and < 40;
-        if (!_byIp.ContainsKey(target.ToString()) || !Reach.CanReach(Laptop.Addresses, target) || rebooting)
+        if (!_byIp.ContainsKey(target.ToString()) || !Reach.CanReach(Laptop, target) || rebooting)
         {
             await Task.Delay(timeout, ct);
             return new PingResult(false, 0, "Request timed out");
@@ -135,17 +156,18 @@ public sealed class DemoSite : IPassiveCapture, IArpResolver, IAddressJoiner, IP
         return new PingResult(true, ms);
     }
 
-    public void ForgetJoined() { lock (_lock) _joined.Clear(); }
+    public void ForgetJoined() { lock (_lock) { _joined.Clear(); _hostRoutes.Clear(); } }
 
     /// <summary>
     /// Demo version of "read details" (ports, web page title, model). Like the real one, it only works when the laptop
     /// has an address in the device's range.
     /// </summary>
     public Task ReadDetailsAsync(Device device, string? ssdpDescriptionUrl, CancellationToken ct) => ReadDetailsAsync(device, ct);
+    public Task ReadDetailsAsync(Device device, IPAddress? source, CancellationToken ct) => ReadDetailsAsync(device, ct);
 
     public Task ReadDetailsAsync(Device device, CancellationToken ct)
     {
-        if (!_byIp.TryGetValue(device.Ip.ToString(), out var d) || !Reach.CanReach(Laptop.Addresses, device.Ip)) return Task.CompletedTask;
+        if (!_byIp.TryGetValue(device.Ip.ToString(), out var d) || !Reach.CanReach(Laptop, device.Ip)) return Task.CompletedTask;
         lock (device)
         {
             foreach (var p in d.Ports) device.OpenPorts.Add(p);

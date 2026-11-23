@@ -153,6 +153,8 @@ public static class DiagnosisWriter
             if (o.CameraUtc != null) sb.AppendLine($"  camera time {o.CameraUtc:yyyy-MM-dd HH:mm:ss} UTC (laptop {o.LaptopUtc:HH:mm:ss} UTC), set by {o.TimeSource}, TZ {o.TimeZone}");
             foreach (var pr in o.Profiles) sb.AppendLine($"  profile {pr.Token} \"{pr.Name}\": {LogNormalizer.ProfileText(pr)}");
             if (o.StreamUri != null) sb.AppendLine($"  stream {o.StreamUri}");
+            if (o.Network is { } net) sb.AppendLine($"  network {LogNormalizer.NetworkText(net)}");
+            if (o.Protocols.Count > 0) sb.AppendLine("  services " + string.Join(", ", o.Protocols.Select(p => $"{p.Key}={(p.Value.Enabled ? p.Value.Port?.ToString() ?? "on" : "off")}")));
             foreach (var u in o.Unsupported) sb.AppendLine($"  ({u})");
             if (o.SystemLog != null)
             {

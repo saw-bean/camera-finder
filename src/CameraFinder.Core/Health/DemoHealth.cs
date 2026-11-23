@@ -26,7 +26,7 @@ public sealed class DemoHealth : IPinger, IHopProber, IOnvifClient, IStreamProbe
     public static readonly Credentials OnvifOnlyLogin = new("onvif", "onvif123");
 
     private bool Reachable(IPAddress ip) =>
-        DemoSite.Devices.Any(d => d.Ip == ip.ToString()) && Reach.CanReach(_site.Laptop.Addresses, ip);
+        DemoSite.Devices.Any(d => d.Ip == ip.ToString()) && Reach.CanReach(_site.Laptop, ip);
 
     private int Next(int min, int max) { lock (_rnd) return _rnd.Next(min, max); }
 
@@ -86,12 +86,38 @@ public sealed class DemoHealth : IPinger, IHopProber, IOnvifClient, IStreamProbe
         report.SystemLog = Log(ip, DateTime.Now);
         if (report.SystemLog == null) report.Unsupported.Add("The camera does not share its system log over ONVIF");
         double fps = ip == "172.16.8.30" ? 30 : 25;
-        report.Profiles.Add(new OnvifProfile("Profile_1", "MainStream", "H264", 2688, 1520, fps, 6144));
-        report.Profiles.Add(new OnvifProfile("Profile_2", "SubStream", "H264", 640, 360, 15, 512));
+        int gop = (int)fps * (ip == "172.16.8.30" ? 8 : 2);
+        report.Profiles.Add(new OnvifProfile("Profile_1", "MainStream", "H264", 2688, 1520, fps, 6144, gop));
+        report.Profiles.Add(new OnvifProfile("Profile_2", "SubStream", "H264", 640, 360, 15, 512, 30));
+        report.Network = DemoNetwork(camera);
+        report.Protocols["HTTP"] = (true, 80);
+        report.Protocols["RTSP"] = (true, 554);
         report.StreamUris["Profile_1"] = $"rtsp://{ip}:554/demo/main";
         report.StreamUris["Profile_2"] = $"rtsp://{ip}:554/demo/sub";
         report.StreamUri = report.StreamUris["Profile_1"];
         return report;
+    }
+
+    /// <summary>
+    /// The demo cameras' network settings: the Hikvision's time server is in another range and it has no gateway
+    /// (why its clock is 3 hours slow); the Dahua gets its address from DHCP; the others are set up properly.
+    /// </summary>
+    private static OnvifNetwork DemoNetwork(IPAddress camera)
+    {
+        string ip = camera.ToString();
+        var b = camera.GetAddressBytes();
+        var n = new OnvifNetwork
+        {
+            Address = camera, Prefix = Net.Ipv4.IsLinkLocal(camera) ? 16 : 24, Dhcp = ip == "192.168.1.108",
+            NtpFromDhcp = false, LinkSpeedMbps = 100, Duplex = "full", AutoNegotiation = true, Mtu = 1500,
+        };
+        if (ip == "192.168.1.64") n.NtpServers.Add("10.0.0.5");
+        else
+        {
+            n.Gateways.Add(new IPAddress(new[] { b[0], b[1], b[2], (byte)1 }));
+            n.NtpServers.Add(new IPAddress(new[] { b[0], b[1], b[2], (byte)10 }).ToString());
+        }
+        return n;
     }
 
     /// <summary>The demo cameras' own logs, written the way each brand words them.</summary>
@@ -120,7 +146,7 @@ public sealed class DemoHealth : IPinger, IHopProber, IOnvifClient, IStreamProbe
 
     // ---- video
 
-    public async Task<StreamReport> ProbeAsync(string url, Credentials? login, TimeSpan watch, CancellationToken ct)
+    public async Task<StreamReport> ProbeAsync(string url, Credentials? login, TimeSpan watch, CancellationToken ct, IPAddress? source = null)
     {
         await Task.Delay(TimeSpan.FromSeconds(Math.Min(3, watch.TotalSeconds)), ct);
         string ip = Uri.TryCreate(url, UriKind.Absolute, out var u) ? u.Host : "";
