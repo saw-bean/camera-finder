@@ -46,8 +46,9 @@ internal sealed class DevicePanel : Panel
     // Stream addresses typed in by hand, per device IP (cameras with ONVIF off, phones, encoders...).
     private static readonly Dictionary<string, string> CustomUrls = new();
 
-    // Logins a camera refused this session: never retried automatically, so clicking through cameras cannot lock accounts.
-    private static readonly HashSet<string> Refused = new();
+    // Logins a camera refused this session, per service (ONVIF and video keep separate users on many cameras): never
+    // retried automatically on that service, so clicking through cameras cannot lock accounts.
+    private static readonly LoginBook Logins = new();
 
     private readonly Label _title = new() { AutoSize = true, Margin = new Padding(0, 0, 0, 2) };
     private readonly Label _subtitle = new() { AutoSize = true, Tag = "secondary", Margin = new Padding(0, 0, 0, 6) };
@@ -111,7 +112,8 @@ internal sealed class DevicePanel : Panel
     private HealthResult? _result;
     private HealthSnapshot? _snapshot;
     private WebPageResult? _reach;
-    private Credentials? _login;
+    private Credentials? _login;      // given to ONVIF
+    private Credentials? _videoLogin; // given to the RTSP stream (live bandwidth, delay, ffmpeg)
     private LiveStats? _live;
     private bool _streamFromLive;
     private int _view;
@@ -186,9 +188,9 @@ internal sealed class DevicePanel : Panel
         _useLogin.Click += (_, _) =>
         {
             if (_device == null || _user.Text.Trim().Length == 0) return;
-            _login = new Credentials(_user.Text.Trim(), _password.Text);
-            Refused.Remove(RefusedKey(_device, _login));
-            Start(loginOverride: _login);
+            var typed = new Credentials(_user.Text.Trim(), _password.Text);
+            Logins.Allow(DeviceId(_device), typed);
+            Start(loginOverride: typed);
         };
         _useUrl.Click += (_, _) =>
         {
@@ -265,6 +267,7 @@ internal sealed class DevicePanel : Panel
         _flashResult = null;
         _reach = null;
         _login = null;
+        _videoLogin = null;
         if (d == null) { Clear(); return; }
         ResetSections();
         RefreshInfo();
@@ -385,7 +388,8 @@ internal sealed class DevicePanel : Panel
             //    Devices that are not cameras get ping and path only: no ONVIF, so no camera password is sent to them.
             string? customUrl = CustomUrls.GetValueOrDefault(d.Ip.ToString());
             bool camera = d.Kind == DeviceKind.Camera || customUrl != null;
-            _login = loginOverride ?? (camera ? PickLogin(d, tools) : null);
+            _login = loginOverride ?? (camera ? PickLogin(d, tools, LoginService.Onvif) : null);
+            _videoLogin = loginOverride ?? (camera ? PickLogin(d, tools, LoginService.Video) : null);
             var check = tools.Health();
             var progress = new Progress<string>(s => { if (!ct.IsCancellationRequested) SetState(s, Theme.TextSecondary); });
             var options = new HealthCheckOptions { Login = _login, CheckStream = false, CheckOnvif = camera, SourceIsTemporary = tools.IsTemporary(reach.Source) };
@@ -396,6 +400,9 @@ internal sealed class DevicePanel : Panel
             _snapshot.Port = _portReport;
             ShowPath(_snapshot.Path);
             UpdateLogin(d, tools, _snapshot.Onvif);
+            // No login of its own for video yet: try the one ONVIF was given (even if ONVIF refused it - ONVIF users are
+            // often separate - unless the video already refused it).
+            if (_videoLogin == null && _login != null && !Logins.IsRefused(DeviceId(d), LoginService.Video, _login)) _videoLogin = _login;
             ShowResult(HealthCheck.Analyse(_snapshot));
 
             if (!camera)
@@ -508,7 +515,7 @@ internal sealed class DevicePanel : Panel
         _video.Text = "ffmpeg: checking the stream…";
         try
         {
-            var report = await Task.Run(() => ffprobe.ProbeAsync(url, _login, TimeSpan.FromSeconds(6), ct), ct);
+            var report = await Task.Run(() => ffprobe.ProbeAsync(url, _videoLogin, TimeSpan.FromSeconds(6), ct), ct);
             if (ct.IsCancellationRequested || _snapshot == null) return;
             _video.Text = "ffmpeg: " + (report.Opened
                 ? $"{report.Codec?.ToUpperInvariant()} {report.Width}x{report.Height}, {report.MeasuredFps:0.#} fps received" +
@@ -570,7 +577,10 @@ internal sealed class DevicePanel : Panel
         _liveCts = CancellationTokenSource.CreateLinkedTokenSource(parent.Token);
         var ct = _liveCts.Token;
         var stats = _live = new LiveStats();
-        var login = _login;
+        var login = _videoLogin;
+        var onvifLogin = _login;
+        var device = d;
+        bool playing = false; // only touched on the UI thread
         var source = _reach?.Source;
         _graph.Data = Array.Empty<LiveSample>();
         _kbps.Text = "…";
@@ -586,6 +596,7 @@ internal sealed class DevicePanel : Panel
                 await tools.Live.RunAsync(url, login, source, stats, sample => Post(() =>
                 {
                     if (ct.IsCancellationRequested) return;
+                    if (!playing) { playing = true; VideoLoginWorked(device, tools, login, onvifLogin); }
                     _graph.Data = stats.History;
                     _graph.Peak = configured;
                     _kbps.Text = LogNormalizer.Mbps(sample.Kbps);
@@ -627,8 +638,11 @@ internal sealed class DevicePanel : Panel
                     if (!ex.LoginRefused) AskUrl("Wrong stream address? Enter another one:");
                     if (ex.LoginRefused && _device != null && _tools != null)
                     {
-                        if (login != null) Refused.Add(RefusedKey(_device, login));
-                        AskLogin(login == null ? "The video stream needs the camera's user name and password." : "The camera refused this login for video. Enter the right one:");
+                        if (login != null) Logins.Refuse(DeviceId(_device), LoginService.Video, login);
+                        if (_snapshot != null && login != null) { _snapshot.VideoLoginAccepted = false; _snapshot.VideoLoginSameAsOnvif = login == onvifLogin; }
+                        AskLogin(login == null
+                            ? "The video stream needs the camera's user name and password."
+                            : $"The camera refused the login \"{login.User}\" for video. It will not be tried again automatically. Enter the right one:");
                     }
                     if (main && _snapshot is { Stream: null })
                     {
@@ -674,17 +688,30 @@ internal sealed class DevicePanel : Panel
 
     // ------------------------------------------------------------------ logins
 
-    private static string RefusedKey(Device d, Credentials c) => $"{d.Ip}|{d.Mac}|{c.User}|{c.Password.GetHashCode()}";
+    private static string DeviceId(Device d) => $"{d.Ip}|{d.Mac}";
 
-    /// <summary>Saved login for this camera, else the last one that worked anywhere (a site usually shares one) - unless this camera refused it.</summary>
-    private static Credentials? PickLogin(Device d, DeviceTools tools)
+    private static string ServiceKey(Device d, LoginService service) => CredentialStore.KeyFor(d.Mac, d.Ip.ToString()) + "#" + service;
+
+    /// <summary>
+    /// Login to try on one service: the one that worked there before, else the one that worked on this camera, else
+    /// the last one that worked anywhere (a site usually shares one) - skipping any this service refused.
+    /// </summary>
+    private static Credentials? PickLogin(Device d, DeviceTools tools, LoginService service)
     {
         if (tools.DemoLogin != null) return tools.DemoLogin;
         var store = tools.Store;
-        string key = CredentialStore.KeyFor(d.Mac, d.Ip.ToString());
-        foreach (var c in new[] { store?.Get(key), store?.Get(CredentialStore.LastUsedKey) })
-            if (c != null && !Refused.Contains(RefusedKey(d, c))) return c;
-        return null;
+        return Logins.Pick(DeviceId(d), service, new[]
+        {
+            store?.Get(ServiceKey(d, service)), store?.Get(CredentialStore.KeyFor(d.Mac, d.Ip.ToString())), store?.Get(CredentialStore.LastUsedKey),
+        });
+    }
+
+    /// <summary>A service accepted a login: remember it (encrypted) for this service, this camera and the site.</summary>
+    private static void Remember(Device d, DeviceTools tools, LoginService service, Credentials login)
+    {
+        if (tools.DemoLogin != null || tools.Store is not { } store) return;
+        store.Save(ServiceKey(d, service), login);
+        store.Save(CredentialStore.KeyFor(d.Mac, d.Ip.ToString()), login); // also becomes the last used
     }
 
     private void UpdateLogin(Device d, DeviceTools tools, OnvifReport? onvif)
@@ -692,16 +719,34 @@ internal sealed class DevicePanel : Panel
         if (onvif == null || !onvif.Answered) return;
         if (onvif.LoginAccepted == true && _login != null)
         {
-            tools.Store?.Save(CredentialStore.KeyFor(d.Mac, d.Ip.ToString()), _login); // worked: remember it (encrypted)
+            Remember(d, tools, LoginService.Onvif, _login);
             _loginRow.Visible = false;
         }
         else if (onvif.LoginAccepted == false)
         {
-            if (_login != null) Refused.Add(RefusedKey(d, _login));
+            if (_login != null) Logins.Refuse(DeviceId(d), LoginService.Onvif, _login);
             AskLogin(_login == null
                 ? "Enter the camera's user name and password to read its log, settings and video:"
-                : $"The camera refused the login \"{_login.User}\". It will not be tried again automatically. Enter the right one:");
+                : $"ONVIF refused the login \"{_login.User}\". It will not be tried on ONVIF again automatically. Enter the right one:");
         }
+    }
+
+    /// <summary>The video stream is playing with this login: remember it, and tell apart "wrong password" from "separate ONVIF users".</summary>
+    private void VideoLoginWorked(Device d, DeviceTools tools, Credentials? login, Credentials? onvifLogin)
+    {
+        if (login == null || _device != d) return;
+        Remember(d, tools, LoginService.Video, login);
+        if (_snapshot == null) return;
+        _snapshot.VideoLoginAccepted = true;
+        _snapshot.VideoLoginSameAsOnvif = login == onvifLogin;
+        if (_snapshot.Onvif is { LoginAccepted: false })
+        {
+            if (_snapshot.VideoLoginSameAsOnvif)
+                AskLogin($"The video plays with \"{login.User}\" but ONVIF refused it: this camera keeps separate ONVIF users. " +
+                         "Enter the ONVIF user to read its log and settings (or add one with this name in the camera's web page):");
+            ShowResult(HealthCheck.Analyse(_snapshot));
+        }
+        else _loginRow.Visible = false;
     }
 
     private void AskUrl(string note)

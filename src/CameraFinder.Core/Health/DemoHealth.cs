@@ -11,6 +11,7 @@ namespace CameraFinder.Core.Health;
 ///   192.168.1.64  Hikvision - the NVR keeps trying an old password, account locked; clock 3 hours slow
 ///   10.0.5.40     Panasonic - packet loss on its cable, so the video drops frames
 ///   172.16.8.30   Wisenet   - SD card failing; key frames 8 s apart
+///   192.168.1.120 Avigilon  - ONVIF has its own users: the video plays with the site login, ONVIF refuses it
 ///   others                  - healthy
 /// </summary>
 public sealed class DemoHealth : IPinger, IHopProber, IOnvifClient, IStreamProber, ILiveStreamSource
@@ -20,6 +21,9 @@ public sealed class DemoHealth : IPinger, IHopProber, IOnvifClient, IStreamProbe
     public DemoHealth(DemoSite site) => _site = site;
 
     public const string LossyDevice = "10.0.5.40";
+    /// <summary>Keeps separate ONVIF users: ONVIF accepts only <see cref="OnvifOnlyLogin"/>, the video accepts any login.</summary>
+    public const string SeparateOnvifUsers = "192.168.1.120";
+    public static readonly Credentials OnvifOnlyLogin = new("onvif", "onvif123");
 
     private bool Reachable(IPAddress ip) =>
         DemoSite.Devices.Any(d => d.Ip == ip.ToString()) && Reach.CanReach(_site.Laptop.Addresses, ip);
@@ -63,6 +67,12 @@ public sealed class DemoHealth : IPinger, IHopProber, IOnvifClient, IStreamProbe
         {
             report.LoginAccepted = false;
             report.LoginError = "the camera needs a user name and password";
+            return report;
+        }
+        if (ip == SeparateOnvifUsers && login != OnvifOnlyLogin)
+        {
+            report.LoginAccepted = false;
+            report.LoginError = "user name or password not accepted";
             return report;
         }
         report.LoginAccepted = true;

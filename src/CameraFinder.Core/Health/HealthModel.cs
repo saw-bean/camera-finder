@@ -119,6 +119,10 @@ public sealed class HealthSnapshot
     public SwitchPortReport? Port { get; set; }
     /// <summary>Live view delay measurements (from the live stream and the flash test).</summary>
     public DelayReport? Delay { get; set; }
+    /// <summary>Whether the video stream (RTSP) accepted the login: true = it played with it, false = 401, null = not tried or no login.</summary>
+    public bool? VideoLoginAccepted { get; set; }
+    /// <summary>Whether the login used for video is the same one ONVIF was given.</summary>
+    public bool VideoLoginSameAsOnvif { get; set; }
 
     /// <summary>Checks that could not run, in plain words ("Video stream not checked: ffprobe.exe is missing").</summary>
     public List<string> NotChecked { get; } = new();
