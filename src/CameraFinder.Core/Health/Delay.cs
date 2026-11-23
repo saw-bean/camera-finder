@@ -65,6 +65,21 @@ public sealed class DelayTracker
         }
     }
 
+    /// <summary>
+    /// Average seconds between the last key frames by the camera's timestamps (capture time), or null until two have
+    /// been seen. Independent of when they arrived: jitter and bursts on the network do not change it.
+    /// </summary>
+    public double? KeyframeInterval()
+    {
+        lock (_frames)
+        {
+            var keys = new List<double>();
+            for (int i = _frames.Count - 1; i >= 0 && keys.Count < 61; i--)
+                if (_frames[i].Key && (keys.Count == 0 || keys[^1] - _frames[i].RtpSeconds > 0.001)) keys.Add(_frames[i].RtpSeconds);
+            return keys.Count < 2 ? null : (keys[0] - keys[^1]) / (keys.Count - 1);
+        }
+    }
+
     /// <summary>The screen just flipped (flash test).</summary>
     public void AddFlash(double at) { lock (_frames) _flashes.Add(at); }
     public void ClearFlashes() { lock (_frames) _flashes.Clear(); }

@@ -20,6 +20,17 @@ static partial class Tests
         return d;
     }
 
+    public static void TestKeyframeIntervalUsesCameraTimeNotArrival()
+    {
+        // Key frame every 2 s by the camera's clock; the network holds back every other group of frames for 0.8 s and
+        // the last group arrives early, so arrival gaps between key frames are 2.8 s, 1.2 s, ... The answer is still 2 s.
+        var d = Synthetic(31, i => (i / 50) % 2 == 1 ? 0.8 : i >= 750 ? -0.9 : 0);
+        var arrivals = d.Frames.Where(f => f.Key).Select(f => f.At).ToList();
+        Assert.True(Math.Abs(arrivals[2] - arrivals[1] - 1.2) < 0.001, "arrival gap is squeezed");
+        Assert.Equal(2.0, Math.Round(d.KeyframeInterval() ?? 0, 3));
+        Assert.True(new DelayTracker().KeyframeInterval() == null, "no frames yet");
+    }
+
     public static void TestDelayEvenBurstyAndFallingBehind()
     {
         var even = Synthetic(60, _ => 0.0).Report();
