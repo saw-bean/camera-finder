@@ -104,13 +104,13 @@ Avigilon, Uniview, Hanwha's newer models and most others are found through ONVIF
    | IP conflict, SD card errors, video loss, overheating, tampering | As named, from the camera's log |
 4. **Explain** — a short diagnosis: the most likely problem first, the evidence, what to try first, then what looked fine and the camera's recent events. *Events* shows the full plain-language timeline and *Collected data* the raw values and log.
 
-The camera's user name and password are needed for the log and video. The panel tries the login saved for that camera, else the last login that worked (a site usually shares one). A login that works is saved automatically, encrypted for your Windows user (DPAPI, `%LOCALAPPDATA%\CameraFinder\logins.dat`). A login the camera **refuses is never retried automatically** — the panel asks for the right one — so clicking through cameras cannot lock their accounts. For a camera reached through a temporary IP, ffprobe cannot connect (it always uses the laptop's main address), so the video check comes from the live bandwidth monitor instead, which can.
+The camera's user name and password are needed for the log and video. The panel tries the login saved for that camera, else the last login that worked (a site usually shares one). One login serves every check: ONVIF (WS-Security password digest, timed with the camera's own clock, or HTTP digest) for the log, settings and stream addresses, and RTSP (Basic/Digest) for the live bandwidth, delay and ffmpeg checks. A login that works on either is saved automatically, encrypted for your Windows user (DPAPI, `%LOCALAPPDATA%\CameraFinder\logins.dat`), and tried first on the next camera. ONVIF and video are tracked separately, because many cameras (Hikvision, Dahua, Axis…) keep ONVIF users apart from their web/RTSP users: when ONVIF refuses a login, the video still tries it, and if the video plays the diagnosis says *"The video accepts the login but ONVIF does not"* with where to add the ONVIF user. A login a service **refuses is never retried on it automatically** — the panel asks for the right one — so clicking through cameras cannot lock their accounts. For a camera reached through a temporary IP, ffprobe cannot connect (it always uses the laptop's main address), so the video check comes from the live bandwidth monitor instead, which can.
 
 **Trace** is mtr for Windows: every router on the way to the device, probed every second, with loss, last/average/best/worst delay and jitter per hop, and a sentence saying where loss starts. On a flat camera network it shows one hop — the device itself.
 
 **Speed test (iperf3)…** runs an iperf3 server on the laptop. At the other end of the cable run (the camera's location, another switch, the NVR rack), run an iperf3 client on a second laptop or phone: `iperf3 -c <laptop IP>` (add `-R` for the other direction, `-u -b 50M` for UDP loss and jitter). Each result is explained: whether it matches a gigabit, 100 Mbit/s or 10 Mbit/s link (100 Mbit/s on a gigabit run is a classic sign of a damaged pair), the UDP loss, and how many cameras the link can carry. Setup adds a Windows Firewall rule for the bundled iperf3 on private and domain networks.
 
-The Demo site has a simulated fault on several cameras (restart loop on 192.168.1.108, NVR with an old password and a slow clock on 192.168.1.64, a lossy cable on 10.0.5.40, a failing SD card on 172.16.8.30), so all of this can be tried without real cameras.
+The Demo site has a simulated fault on several cameras (restart loop on 192.168.1.108, NVR with an old password and a slow clock on 192.168.1.64, a lossy cable on 10.0.5.40, a failing SD card on 172.16.8.30, separate ONVIF users on 192.168.1.120 — ONVIF login `onvif` / `onvif123`), so all of this can be tried without real cameras.
 
 ## Limits
 
@@ -119,7 +119,7 @@ The Demo site has a simulated fault on several cameras (restart loop on 192.168.
 - **Devices that never transmit**, in a range nothing else uses, can only be found if they answer ONVIF/UPnP.
 - **Manufacturer** is the company the MAC address is registered to. It can be a parent company or chip maker (e.g. Avigilon cameras show as *Motorola Solutions*; some controllers show the network module maker).
 - **No web page** (some door controllers): use the manufacturer's software (e.g. EntraPass/KT-Finder for Kantech).
-- The app never logs in, guesses passwords or changes device settings.
+- The app never guesses passwords or changes device settings. It logs in only with a login you typed or saved, and only to read (ONVIF queries, RTSP video, SNMP reads).
 
 ## Use responsibly
 

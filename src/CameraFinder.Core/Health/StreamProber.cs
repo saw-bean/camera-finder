@@ -165,6 +165,7 @@ public static class RtspPaths
             : v.Contains("panasonic") || v.Contains("i-pro") || v.Contains("wv-") ? "/MediaInput/h264"
             : v.Contains("vivotek") ? "/live.sdp"
             : v.Contains("uniview") ? "/media/video1"
+            : v.Contains("avigilon") ? "/defaultPrimary?streamType=u"
             : "";
         return path.Length == 0 ? null : $"rtsp://{ip}:554{path}";
     }

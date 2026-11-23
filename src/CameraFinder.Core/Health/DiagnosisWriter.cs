@@ -139,6 +139,12 @@ public static class DiagnosisWriter
             foreach (var h in t.Hops)
                 sb.AppendLine($"  {h.Ttl,3}  {h.Address?.ToString() ?? "???",-15}  {h.LossPercent,5:0.#}  {h.Sent,4}  {h.LastMs,4}  {h.AvgMs,4:0}  {h.BestMs,4}  {h.WorstMs,5}  {h.JitterMs,6:0.#}");
         }
+        if (s.VideoLoginAccepted is { } vl)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"[Video login] {(vl ? "accepted" : "refused")} by the RTSP stream" +
+                (s.Onvif?.LoginAccepted != null ? (s.VideoLoginSameAsOnvif ? " (same login as ONVIF)" : " (a different login from ONVIF)") : ""));
+        }
         if (s.Onvif is { } o)
         {
             sb.AppendLine();

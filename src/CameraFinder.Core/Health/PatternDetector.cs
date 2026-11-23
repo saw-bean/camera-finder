@@ -244,7 +244,22 @@ public static class PatternDetector
                 $"Wrong passwords are being tried ({failed.Count} refused logins)", "The camera's log shows repeated refused logins." + who, advice));
         }
 
-        if (s.Onvif is { LoginAccepted: false } o)
+        if (s.Onvif is { LoginAccepted: false } ov && s.VideoLoginAccepted == true && s.VideoLoginSameAsOnvif)
+        {
+            // Same user and password: the video plays, ONVIF refuses. The camera keeps a separate ONVIF user list.
+            var advice = new List<string>
+            {
+                "In the camera's web page, turn ONVIF on and add an ONVIF user with this same name and password " +
+                "(Hikvision: Configuration > Network > Advanced Settings > Integration Protocol; Dahua: System > Account > ONVIF User; Axis: System > ONVIF).",
+                "NVRs that add cameras over ONVIF need this too, or they show the camera offline even though its video works.",
+            };
+            if (ov.ClockOffset is { } off && Math.Abs(off.TotalMinutes) > 5)
+                advice.Insert(0, "The camera's clock is far off, which alone can make ONVIF logins fail. Fix the time first.");
+            f.Add(new Finding("onvif-login", Severity.Warning, "The video accepts the login but ONVIF does not",
+                "The same user name and password play the video (RTSP) but ONVIF refuses them, so this camera keeps its ONVIF users separately. " +
+                "Without ONVIF its log, settings and stream addresses cannot be read.", advice));
+        }
+        else if (s.Onvif is { LoginAccepted: false } o)
         {
             var advice = new List<string>
             {
