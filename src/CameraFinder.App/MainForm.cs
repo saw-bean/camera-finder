@@ -54,6 +54,7 @@ public sealed class MainForm : Form
     private Task? _scanEngineTask; // the engine itself (runs off the UI thread)
     private Device? _foundTarget;
     private Func<Adapter?>? _adapterNow; // the scan adapter as it is now (real network)
+    private WebSessionWindow? _sessionWindow; // open while the network is switched over to a device's network
 
     /// <summary>Set by --screenshot: run the demo and save screenshots there, then exit.</summary>
     public string? ScreenshotFolder { get; init; }
@@ -583,6 +584,7 @@ public sealed class MainForm : Form
                     AppendLog($"DEMO: would open {result.Url} ({d.Description}). Demo devices have no real web page.");
                     break;
                 case WebPageStatus.Ready:
+                    await BeginWebSessionAsync(d, result.Url!, result.Source);
                     AppendLog($"Opening {result.Url}");
                     OpenUrl(result.Url!);
                     break;
@@ -607,6 +609,47 @@ public sealed class MainForm : Form
             _status.Text = "Ready";
             UpdateButtons();
         }
+    }
+
+    /// <summary>
+    /// Before opening a device's page: switches the laptop's network over to the device's network (the temporary IP
+    /// becomes a main address and the device is routed through the scan adapter), so the browser can reach it.
+    /// Ends any previous session. A small window stays open; closing it puts the network back to normal.
+    /// Nothing changes when the laptop already has a normal address in the device's range.
+    /// </summary>
+    private async Task BeginWebSessionAsync(Device d, string url, IPAddress? source)
+    {
+        EndWebSession();
+        if (source == null || _adapterNow?.Invoke() is not { } adapter) return;
+        bool temporary = _temp.Added.Any(a => a.AdapterName == adapter.Name && a.Ip == source.ToString());
+        var others = Adapter.List().Where(a => a.Id != adapter.Id);
+        if (!WebSession.Needed(temporary, others, d.Ip)) return;
+
+        _status.Text = $"Switching the network to {d.Ip}'s range…";
+        var session = await _temp.StartWebSessionAsync(adapter, source, d.Ip, CancellationToken.None);
+        if (session == null)
+        {
+            AppendLog($"Could not switch the network over to {d.Ip}'s range; opening the page anyway (it may not load).");
+            return;
+        }
+        var window = new WebSessionWindow(session, url, d.Description, () => OpenUrl(url), this);
+        window.FormClosed += (_, _) =>
+        {
+            if (_sessionWindow != window) return; // already ended (another page opened, IPs removed, app closing)
+            _sessionWindow = null;
+            _temp.EndWebSession();
+        };
+        _sessionWindow = window;
+        window.Show(this);
+    }
+
+    /// <summary>Ends the web session in progress, if any: closes its window and puts the network back to normal.</summary>
+    private void EndWebSession()
+    {
+        var window = _sessionWindow;
+        _sessionWindow = null;
+        if (window != null && !window.IsDisposed) window.Close();
+        _temp.EndWebSession();
     }
 
     /// <summary>The selected device and the laptop address to reach it from (null = let Windows choose).</summary>
@@ -722,6 +765,7 @@ public sealed class MainForm : Form
             _demoSite.ForgetJoined();
         }
         int n = _temp.Added.Count;
+        EndWebSession();
         _temp.RemoveAll();
         AppendLog(n == 0 ? "No temporary IPs to remove." : $"Removed {n} temporary IP(s). The adapter is back to normal.");
     }
@@ -782,11 +826,12 @@ public sealed class MainForm : Form
         _cts?.Cancel();
         // Let the engine wind down before undoing its network changes, so it cannot add an address afterwards.
         try { _scanEngineTask?.Wait(TimeSpan.FromSeconds(8)); } catch { /* cancelled or failed: fine */ }
-        if (_temp.Added.Count > 0)
+        if (_sessionWindow != null) { var w = _sessionWindow; _sessionWindow = null; w.Close(); }
+        if (_temp.HasChanges)
         {
             _status.Text = "Removing temporary IPs…";
             Refresh();
-            _temp.RemoveAll();
+            _temp.RemoveAll(); // also ends a web session: the network goes back to normal
         }
         _panel.Stop();
         if (_downloadedUpdate != null && File.Exists(_downloadedUpdate))

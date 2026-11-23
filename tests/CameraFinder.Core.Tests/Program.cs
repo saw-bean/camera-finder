@@ -556,6 +556,17 @@ static partial class Tests
         }
     }
 
+    public static void TestWebSessionOnlyWhenNeeded()
+    {
+        var device = IPAddress.Parse("192.168.1.64");
+        var wifiSameRange = new Adapter("wifi", "Wi-Fi", "wifi", 2, "00:11:22:33:44:66", false, true,
+            new List<(IPAddress, int)> { (IPAddress.Parse("192.168.1.20"), 24) }, new List<IPAddress>());
+        var wifiOther = wifiSameRange with { Addresses = new List<(IPAddress, int)> { (IPAddress.Parse("10.9.9.9"), 24) } };
+        Assert.True(WebSession.Needed(true, Array.Empty<Adapter>(), device), "temporary source: browser cannot use it as is");
+        Assert.True(!WebSession.Needed(false, new[] { wifiOther }, device), "normal address, no competing adapter: nothing to change");
+        Assert.True(WebSession.Needed(false, new[] { wifiSameRange }, device), "Wi-Fi in the same range would take the traffic");
+    }
+
     public static void TestHikvisionDefaultRangeIsJoinable()
     {
         Assert.True(Ipv4.IsJoinable(IPAddress.Parse("192.0.0.64")), "Hikvision default 192.0.0.64");

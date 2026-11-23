@@ -74,7 +74,7 @@ public sealed class WebPageAccess
         // Check again even when a URL is known: the page may only now be reachable, or may have moved port.
         if (added != null || device.WebUrl == null) await _readDetails(device, ct);
         return device.WebUrl != null
-            ? new WebPageResult(WebPageStatus.Ready, device.WebUrl, range, added)
-            : new WebPageResult(WebPageStatus.NoWebPage, Range: range, TemporaryAddress: added);
+            ? new WebPageResult(WebPageStatus.Ready, device.WebUrl, range, added, reach.Source)
+            : new WebPageResult(WebPageStatus.NoWebPage, Range: range, TemporaryAddress: added, Source: reach.Source);
     }
 }
