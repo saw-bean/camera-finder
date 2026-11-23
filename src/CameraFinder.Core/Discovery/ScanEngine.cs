@@ -22,6 +22,8 @@ public sealed class ScanOptions
 
     /// <summary>Maximum number of extra ranges to join automatically.</summary>
     public int MaxExtraRanges { get; init; } = 6;
+    /// <summary>At most this many devices with public-looking addresses get a one-device route during a scan.</summary>
+    public int MaxHostRoutes { get; init; } = 16;
 
     /// <summary>
     /// Also ask with manufacturer discovery protocols (Hikvision SADP, Dahua, Hanwha, Bosch, i-PRO, Vivotek, Sony,
@@ -134,6 +136,8 @@ public sealed class ScanEngine
 
         // ---- 3. Join ranges and sweep ---------------------------------------------------------------------
         var sweepPlan = new List<(Subnet Range, IPAddress Source, List<IPAddress> Only)>();
+        var joinedRanges = new List<(Subnet Range, IPAddress Source)>();           // temporary addresses: bind to them
+        var hostSources = new Dictionary<IPAddress, IPAddress>();               // public-looking devices: one-device routes
         foreach (var (subnet, addr) in ownSubnets.Where(s => !Ipv4.IsLinkLocal(s.Address)))
             sweepPlan.Add((ArpSweeper.SweepRange(subnet, addr), addr, new()));
 
@@ -153,7 +157,7 @@ public sealed class ScanEngine
             {
                 Report($"Joining {range}", 42);
                 var ip = await _temp.AddFreeAddressAsync(adapter, range, avoid, ct);
-                if (ip != null) { sweepPlan.Add((range, ip, new())); ownAddresses.Add(ip); }
+                if (ip != null) { sweepPlan.Add((range, ip, new())); joinedRanges.Add((range, ip)); ownAddresses.Add(ip); }
             }
             if (newRanges.Count > options.MaxExtraRanges)
                 Say($"Skipped {newRanges.Count - options.MaxExtraRanges} more range(s) (limit {options.MaxExtraRanges}).");
@@ -162,7 +166,17 @@ public sealed class ScanEngine
             {
                 var ll = adapter.Addresses.FirstOrDefault(a => Ipv4.IsLinkLocal(a.Address)).Address
                     ?? await _temp.AddFreeAddressAsync(adapter, Subnet.Parse("169.254.0.0/16"), avoid, ct);
-                if (ll != null) { sweepPlan.Add((Subnet.Parse("169.254.0.0/16"), ll, linkLocalDevices)); ownAddresses.Add(ll); }
+                if (ll != null) { sweepPlan.Add((Subnet.Parse("169.254.0.0/16"), ll, linkLocalDevices)); joinedRanges.Add((Subnet.Parse("169.254.0.0/16"), ll)); ownAddresses.Add(ll); }
+
+            // Devices with public-looking addresses (set by hand on a closed camera network): a route for each one
+            // only, so the laptop's internet traffic to the rest of that range is not touched.
+            var publicDevices = _devices.Keys.Where(Reach.NeedsHostRoute).Take(options.MaxHostRoutes).ToList();
+            if (publicDevices.Count > 0) Say($"{publicDevices.Count} device(s) with a public-looking address: reaching each through its own route.");
+            foreach (var ip in publicDevices)
+            {
+                var src = await _temp.AddHostRouteAsync(adapter, ip, avoid, ct);
+                if (src != null) { hostSources[ip] = src; ownAddresses.Add(src); }
+            }
             }
 
             for (int i = 0; i < sweepPlan.Count; i++)
@@ -200,7 +214,9 @@ public sealed class ScanEngine
                 try
                 {
                     _ssdpDescriptions.TryGetValue(d.Ip, out var desc);
-                    await (_readDetails?.Invoke(d, desc, ct) ?? enricher.EnrichAsync(d, desc, ct));
+                    // Connect from the temporary address in the device's range: Windows never picks it by itself.
+                    var source = hostSources.GetValueOrDefault(d.Ip) ?? joinedRanges.FirstOrDefault(j => j.Range.Contains(d.Ip)).Source;
+                    await (_readDetails?.Invoke(d, desc, ct) ?? enricher.EnrichAsync(d, desc, ct, source));
                     DeviceChanged?.Invoke(d);
                 }
                 finally

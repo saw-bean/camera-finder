@@ -402,14 +402,20 @@ public sealed class MainForm : Form
             if (_adapters.SelectedItem is not Adapter picked) { AppendLog("Pick an adapter first."); return; }
             // Refresh the adapter: its addresses may have changed since the list was loaded.
             adapter = Adapter.List().FirstOrDefault(a => a.Id == picked.Id) ?? picked;
+            // Virtual IPs go on the adapter being scanned. Devices on the cable are only reachable through the wired one.
+            if (!adapter.IsWired && Adapter.List().FirstOrDefault(a => a.IsWired) is { } wired)
+                AppendLog($"Note: scanning {adapter.Name} (Wi-Fi) while {wired.Name} (Ethernet) is connected. To reach devices on the cable, pick {wired.Name} above.");
+            else if (!adapter.IsWired)
+                AppendLog($"Scanning {adapter.Name} (Wi-Fi): no Ethernet cable is connected. Plug in the cable and press ↻ to scan the camera network.");
             options = new ScanOptions { SafeMode = _safeMode.Checked, ListenTime = TimeSpan.FromSeconds(ListenSeconds) };
             _demoSite = null;
             _engine = new ScanEngine(new WindowsArpResolver(), _temp);
             string adapterId = adapter.Id;
-            _adapterNow = () => Adapter.List().FirstOrDefault(a => a.Id == adapterId);
-            _web = new WebPageAccess(OperatingSystem.IsWindows() ? _temp : null,
-                () => Adapter.List().FirstOrDefault(a => a.Id == adapterId),
-                async (d, ct) => { using var enricher = new DeviceEnricher(); await enricher.EnrichAsync(d, null, ct); });
+            // The scan adapter as it is now, with the one-device routes this app added on it.
+            _adapterNow = () => Adapter.List().FirstOrDefault(a => a.Id == adapterId) is { } now ? _temp.WithHostRoutes(now) : null;
+            var adapterNow = _adapterNow;
+            _web = new WebPageAccess(OperatingSystem.IsWindows() ? _temp : null, adapterNow,
+                async (d, source, ct) => { using var enricher = new DeviceEnricher(); await enricher.EnrichAsync(d, null, ct, source); });
         }
 
         _panel.Tools = CreateDeviceTools();
@@ -510,7 +516,7 @@ public sealed class MainForm : Form
         }
         IEnumerable<IPAddress> Candidates() => _engine?.Devices.Select(x => x.Ip).ToList() ?? new List<IPAddress>();
         Func<Adapter?> adapterNow = _demoSite is { } ds ? () => ds.Laptop : () => _adapterNow?.Invoke();
-        IPAddress? SourceFor(IPAddress ip) => adapterNow() is { } a ? CameraFinder.Core.Net.Reach.SourceFor(a.Addresses, ip) : null;
+        IPAddress? SourceFor(IPAddress ip) => adapterNow() is { } a ? CameraFinder.Core.Net.Reach.SourceFor(a, ip) : null;
 
         async Task<WebPageResult> Reach(Device d, bool mayJoin)
         {
@@ -595,7 +601,7 @@ public sealed class MainForm : Form
                     AppendLog($"Could not add a temporary IP in {result.Range} to reach {d.Ip}. Run Camera Finder as administrator, or set an IP in that range on the laptop by hand.");
                     break;
                 case WebPageStatus.NotJoinable:
-                    AppendLog($"{d.Ip} is in a public IP range; the app only adds temporary IPs in private ranges. Set an address on the laptop by hand.");
+                    AppendLog($"{d.Ip} is not a device address (broadcast, multicast or loopback).");
                     break;
             }
         }

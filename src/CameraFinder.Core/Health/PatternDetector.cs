@@ -41,6 +41,7 @@ public static class PatternDetector
             "Check the view: the lens may be covered, sprayed, knocked out of position or out of focus.");
         Stream(s, f);
         Port(s, f);
+        CameraSettings(s, f);
         LiveViewDelay(s, f);
         Address(s, f);
         return f.OrderByDescending(x => x.Severity).ThenBy(x => Rank(x.Code)).ToList();
@@ -49,9 +50,9 @@ public static class PatternDetector
     // Within the same severity: what stops the camera working, or gets worse by itself, comes first.
     private static readonly string[] Priority =
     {
-        "offline", "port-down", "services-down", "restart-loop", "link-10m", "half-duplex", "crc-errors", "locked", "ip-conflict", "power", "packet-loss", "stream-failed",
-        "video-loss", "heat", "failed-logins", "onvif-login", "link-flap", "clock", "frame-drops", "stream-stall",
-        "latency", "falling-behind", "camera-slow", "slow-open", "bursty", "storage", "memory", "tamper", "not-activated", "link-local", "ntp", "long-gop", "ping-blocked",
+        "offline", "port-down", "services-down", "restart-loop", "link-10m", "half-duplex", "crc-errors", "locked", "ip-conflict", "power", "packet-loss", "rtsp-off", "stream-failed",
+        "video-loss", "heat", "failed-logins", "onvif-login", "link-flap", "clock", "gateway-outside", "frame-drops", "stream-stall",
+        "latency", "falling-behind", "camera-slow", "slow-open", "bursty", "storage", "memory", "tamper", "not-activated", "link-local", "ntp", "dhcp", "long-gop", "ping-blocked",
     };
 
     private static int Rank(string code) { int i = Array.IndexOf(Priority, code); return i < 0 ? Priority.Length : i; }
@@ -190,15 +191,18 @@ public static class PatternDetector
         if (s.Onvif?.ClockOffset is not { } off)
         {
             if (ntpErrors)
-                f.Add(new Finding("ntp", Severity.Warning, "The camera cannot reach its time server",
-                    "Its log shows NTP failures.",
-                    new[] { "Point the camera's NTP setting at the NVR or a server it can reach on this network (cameras often have no internet access)." }));
+            {
+                var ntpAdvice = new List<string> { "Point the camera's NTP setting at the NVR or a server it can reach on this network (cameras often have no internet access)." };
+                if (s.Onvif?.Network is { } n0 && NtpReachProblem(n0) is { } why0) ntpAdvice.Insert(0, why0);
+                f.Add(new Finding("ntp", Severity.Warning, "The camera cannot reach its time server", "Its log shows NTP failures.", ntpAdvice));
+            }
             return;
         }
         double secs = Math.Abs(off.TotalSeconds);
         if (secs < 120) return;
         bool ntp = string.Equals(s.Onvif.TimeSource, "NTP", StringComparison.OrdinalIgnoreCase);
         var advice = new List<string>();
+        if (s.Onvif.Network is { } net && (ntp || ntpErrors) && NtpReachProblem(net) is { } why) advice.Add(why);
         if (ntp || ntpErrors)
             advice.Add("NTP is on but not working: point it at the NVR or a time server the camera can reach (cameras often have no internet).");
         else
@@ -318,6 +322,71 @@ public static class PatternDetector
             f.Add(new Finding("long-gop", Severity.Notice, "Key frames are far apart",
                 $"A key frame (I-frame) arrives only every {k:0.#} s. Live view is slow to start and the NVR can only jump to those points.",
                 new[] { $"Set the I-frame interval to about twice the frame rate (e.g. {Math.Round((nominal ?? 25) * 2)}) unless you use smart codec on purpose to save storage." }));
+    }
+
+    /// <summary>Why the camera cannot reach its time server, judging by its own network settings, or null.</summary>
+    public static string? NtpReachProblem(OnvifNetwork n)
+    {
+        if (n.NtpServers.Count == 0)
+            return n.NtpFromDhcp == true
+                ? "The camera waits for DHCP to tell it a time server, and none was given."
+                : "No time server is set in the camera.";
+        var sub = n.Subnet;
+        foreach (var server in n.NtpServers)
+        {
+            if (IPAddress.TryParse(server, out var ip))
+            {
+                if (sub is { } net && !net.Contains(ip) && n.Gateways.Count == 0)
+                    return $"Its time server {server} is outside the camera's network ({net}) and the camera has no gateway, so it can never reach it.";
+            }
+            else
+                return $"Its time server is a name ({server}): that needs DNS and internet access, which cameras on a closed network do not have. Use the NVR's IP address instead.";
+        }
+        return null;
+    }
+
+    /// <summary>Problems in the camera's own settings, read over ONVIF with the login.</summary>
+    private static void CameraSettings(HealthSnapshot s, List<Finding> f)
+    {
+        if (s.Onvif is not { } o) return;
+        if (o.Network is { } n)
+        {
+            if (n.Subnet is { } sub && n.Gateways.Count > 0 && !n.Gateways.Any(sub.Contains))
+                f.Add(new Finding("gateway-outside", Severity.Warning, "The camera's gateway is outside its own network",
+                    $"It is set to {n.Address}/{n.Prefix} with gateway {string.Join(", ", n.Gateways)}. It can only talk to devices in {sub}: " +
+                    "an NVR, time server or phone app in any other range cannot reach it.",
+                    new[]
+                    {
+                        $"Set the gateway to the router's address inside {sub}, or correct the subnet mask if the gateway is right.",
+                        "Cameras often get this wrong when the IP was changed but the gateway kept the factory value.",
+                    }));
+            if (s.Port == null)
+            {
+                // No managed switch to ask: the camera's own view of its link.
+                string forced = n.AutoNegotiation == false ? " Speed and duplex are forced in the camera's settings." : "";
+                if (n.Duplex == "half")
+                    f.Add(new Finding("half-duplex", Severity.Problem, "The camera's network port runs at half duplex",
+                        $"The camera says its link negotiated {n.LinkSpeedMbps?.ToString() ?? "?"} Mbit/s half duplex.{forced}",
+                        new[] { "Set speed and duplex to auto in the camera and on the switch port.", "If it stays at half duplex, re-terminate or replace the cable." }));
+                if (n.LinkSpeedMbps is > 0 and <= 10)
+                    f.Add(new Finding("link-10m", Severity.Problem, "The camera's link is running at only 10 Mbit/s",
+                        $"The camera says its link negotiated {n.LinkSpeedMbps} Mbit/s.{forced} That is too slow for video and usually means a damaged pair or a bad connector.",
+                        new[] { "Re-terminate both ends and test the run with a cable tester; check for couplers or splices." }));
+            }
+            if (n.Dhcp == true)
+                f.Add(new Finding("dhcp", Severity.Notice, "The camera gets its address from DHCP",
+                    "If the DHCP server gives it another address (after a power cut or a new router), the NVR loses it and shows it offline although the camera is fine.",
+                    new[] { "Give the camera a static IP, or reserve its address in the DHCP server for its MAC." }));
+        }
+        if (o.Protocols.TryGetValue("RTSP", out var rtsp) && !rtsp.Enabled)
+            f.Add(new Finding("rtsp-off", Severity.Warning, "RTSP is turned off in the camera",
+                "NVRs, VMS software and phone apps that pull the video over RTSP get nothing.",
+                new[] { "Turn RTSP on in the camera's web page (network / advanced settings)." }));
+        if (s.Stream?.KeyframeInterval == null && o.Profiles.FirstOrDefault() is { KeyframeSeconds: > 4.5 } main)
+            f.Add(new Finding("long-gop", Severity.Notice, "Key frames are set far apart",
+                $"The main stream is set to a key frame (I-frame) every {main.GovLength} frames at {main.FrameRate:0.#} fps = every {main.KeyframeSeconds:0.#} s. " +
+                "Live view waits up to that long for a picture, and the NVR can only jump to those points.",
+                new[] { $"Set the I-frame interval to about twice the frame rate (e.g. {Math.Round((main.FrameRate ?? 25) * 2)}) unless you use smart codec on purpose to save storage." }));
     }
 
     private static void Port(HealthSnapshot s, List<Finding> f)

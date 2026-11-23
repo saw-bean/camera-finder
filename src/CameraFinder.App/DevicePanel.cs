@@ -382,7 +382,7 @@ internal sealed class DevicePanel : Panel
             if (reach.Status == WebPageStatus.JoinFailed)
                 ShowReach($"Could not add a temporary IP in {reach.Range} (run as administrator?). Checking anyway; replies are unlikely.", join: false);
             if (reach.Status == WebPageStatus.NotJoinable)
-                ShowReach($"{d.Ip} is in a public range; no temporary IP is added there. Checking from the laptop's own address.", join: false);
+                ShowReach($"{d.Ip} is not a device address (broadcast, multicast or loopback).", join: false);
 
             // 2. Health: ping, path, ONVIF. Video is measured by the live stream and ffmpeg below.
             //    Devices that are not cameras get ping and path only: no ONVIF, so no camera password is sent to them.
@@ -416,12 +416,10 @@ internal sealed class DevicePanel : Panel
             // 3. Live bandwidth and the ffmpeg check, side by side.
             FillStreams(_snapshot);
             StartLive();
-            if (check.StreamProber is { } ffprobe && !options.SourceIsTemporary && (customUrl ?? HealthCheck.StreamUrl(_snapshot)) is { } url)
-                _ = RunFfprobeAsync(ffprobe, url, ct);
+            if (check.StreamProber is { } ffprobe && (customUrl ?? HealthCheck.StreamUrl(_snapshot)) is { } url)
+                _ = RunFfprobeAsync(ffprobe, url, options.SourceIsTemporary ? reach.Source : null, ct);
             else
-                _video.Text = "ffmpeg: " + (options.SourceIsTemporary
-                    ? "measured from the live stream instead (ffprobe cannot connect from a temporary IP)."
-                    : check.StreamMissingReason ?? "no stream address known.");
+                _video.Text = "ffmpeg: " + (check.StreamMissingReason ?? "no stream address known.");
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -510,12 +508,13 @@ internal sealed class DevicePanel : Panel
         (p.MacsOnPort > 3 ? $" · shared by {p.MacsOnPort} devices (traffic includes theirs)" : "") +
         "\nWhat the device sends (↑) and receives (↓) on the wire, all traffic, read from the switch every 2 s.";
 
-    private async Task RunFfprobeAsync(IStreamProber ffprobe, string url, CancellationToken ct)
+    /// <param name="source">The temporary address to connect from (ffprobe then goes through a local relay), or null.</param>
+    private async Task RunFfprobeAsync(IStreamProber ffprobe, string url, IPAddress? source, CancellationToken ct)
     {
         _video.Text = "ffmpeg: checking the stream…";
         try
         {
-            var report = await Task.Run(() => ffprobe.ProbeAsync(url, _videoLogin, TimeSpan.FromSeconds(6), ct), ct);
+            var report = await Task.Run(() => ffprobe.ProbeAsync(url, _videoLogin, TimeSpan.FromSeconds(6), ct, source), ct);
             if (ct.IsCancellationRequested || _snapshot == null) return;
             _video.Text = "ffmpeg: " + (report.Opened
                 ? $"{report.Codec?.ToUpperInvariant()} {report.Width}x{report.Height}, {report.MeasuredFps:0.#} fps received" +

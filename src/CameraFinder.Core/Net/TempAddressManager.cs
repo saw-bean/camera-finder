@@ -8,8 +8,18 @@ namespace CameraFinder.Core.Net;
 /// <summary>Gives the laptop an address in another range on the same cable, so it can talk to devices there.</summary>
 public interface IAddressJoiner
 {
-    /// <summary>Adds a free address in <paramref name="subnet"/> to the adapter and returns it, or null.</summary>
-    Task<IPAddress?> AddFreeAddressAsync(Adapter adapter, Subnet subnet, ISet<IPAddress> avoid, CancellationToken ct);
+    /// <summary>
+    /// Adds a free address in <paramref name="subnet"/> to the adapter and returns it, or null. With
+    /// <paramref name="near"/> (the device to reach), addresses close to it are tried first, so the laptop is inside the
+    /// device's own subnet even when its mask is smaller than /24.
+    /// </summary>
+    Task<IPAddress?> AddFreeAddressAsync(Adapter adapter, Subnet subnet, ISet<IPAddress> avoid, CancellationToken ct, IPAddress? near = null);
+
+    /// <summary>
+    /// Reaches one device in a range the app does not take over (a public-looking address): adds a /32 address in the
+    /// device's /24 and a route for that one device on the adapter. Returns the address to send from, or null.
+    /// </summary>
+    Task<IPAddress?> AddHostRouteAsync(Adapter adapter, IPAddress device, ISet<IPAddress> avoid, CancellationToken ct);
 }
 
 /// <summary>
@@ -41,7 +51,17 @@ public sealed class TempAddressManager : IAddressJoiner
     public IReadOnlyList<AddedAddress> Added => _state.Addresses;
 
     /// <summary>True while anything this app changed is still in place (addresses, coexistence, a web session).</summary>
-    public bool HasChanges => _state.Addresses.Count + _state.CoexistenceEnabledOn.Count + _state.MainAddresses.Count + _state.Routes.Count > 0;
+    public bool HasChanges => _state.Addresses.Count + _state.CoexistenceEnabledOn.Count + _state.MainAddresses.Count + _state.Routes.Count + _state.HostRoutes.Count > 0;
+
+    /// <summary>Devices reached through a one-device route, and the laptop address used for each.</summary>
+    public IReadOnlyList<(IPAddress Device, IPAddress Source)> HostRoutes =>
+        _state.HostRoutes.Select(r => (IPAddress.Parse(r.Target), IPAddress.Parse(r.Source))).ToList();
+
+    /// <summary><paramref name="adapter"/> with this app's one-device routes on it (for <see cref="Reach.SourceFor(Adapter, IPAddress)"/>).</summary>
+    public Adapter WithHostRoutes(Adapter adapter) => adapter with
+    {
+        HostRoutes = _state.HostRoutes.Where(r => r.AdapterName == adapter.Name).Select(r => (IPAddress.Parse(r.Target), IPAddress.Parse(r.Source))).ToList(),
+    };
 
     /// <summary>The web page session in progress (network switched over to one device), or null.</summary>
     public WebSession? Session { get; private set; }
@@ -50,6 +70,10 @@ public sealed class TempAddressManager : IAddressJoiner
 
     /// <summary>A route to one device, added for a web session (active only: never survives a restart).</summary>
     public sealed record AddedRoute(string AdapterName, string Target);
+
+    /// <summary>A route to one device in a public-looking range, sent from <paramref name="Source"/> (a /32 temporary address).</summary>
+    /// <param name="Owned">False when the route was there already: it is used but never removed.</param>
+    public sealed record HostRoute(string AdapterName, string Target, string Source, bool Owned = true);
 
     private sealed class State
     {
@@ -60,13 +84,72 @@ public sealed class TempAddressManager : IAddressJoiner
         public List<AddedAddress> MainAddresses { get; set; } = new();
         /// <summary>Routes added for a web session.</summary>
         public List<AddedRoute> Routes { get; set; } = new();
+        /// <summary>One-device routes (kept until the app closes, like the temporary addresses).</summary>
+        public List<HostRoute> HostRoutes { get; set; } = new();
     }
 
     /// <summary>
     /// Adds a free address in <paramref name="subnet"/> to the adapter. Tries addresses from the top of the
     /// range downwards (.250, .249 ...), skipping any in <paramref name="avoid"/>. Returns the address, or null.
     /// </summary>
-    public async Task<IPAddress?> AddFreeAddressAsync(Adapter adapter, Subnet subnet, ISet<IPAddress> avoid, CancellationToken ct)
+    public Task<IPAddress?> AddFreeAddressAsync(Adapter adapter, Subnet subnet, ISet<IPAddress> avoid, CancellationToken ct, IPAddress? near = null) =>
+        AddAsync(adapter, subnet, subnet.MaskAddress.ToString(), avoid, near, ct);
+
+    public async Task<IPAddress?> AddHostRouteAsync(Adapter adapter, IPAddress device, ISet<IPAddress> avoid, CancellationToken ct)
+    {
+        if (!OperatingSystem.IsWindows()) { _log("Adding routes is only supported on Windows."); return null; }
+        var existing = _state.HostRoutes.FirstOrDefault(r => r.AdapterName == adapter.Name && r.Target == device.ToString());
+        if (existing != null) return IPAddress.Parse(existing.Source);
+        if (LaptopUses(device))
+        {
+            _log($"Not adding a route to {device}: this laptop uses that address itself (DNS server or gateway), and the route would cut it off.");
+            return null;
+        }
+
+        // One /32 address per /24 is enough: every device in it gets its own route from that address.
+        var block = Subnet.Of(device, 24);
+        var source = _state.Addresses.FirstOrDefault(a => a.AdapterName == adapter.Name && a.Mask == "255.255.255.255" && block.Contains(IPAddress.Parse(a.Ip))) is { } a0
+            ? IPAddress.Parse(a0.Ip)
+            : await AddAsync(adapter, block, "255.255.255.255", avoid, device, ct);
+        if (source == null) return null;
+
+        var route = new HostRoute(adapter.Name, device.ToString(), source.ToString());
+        _state.HostRoutes.Add(route);
+        SaveState();
+        var (ok, output) = await Task.Run(() => Netsh(
+            $"interface ipv4 add route prefix={device}/32 interface=\"{adapter.Name}\" nexthop=0.0.0.0 metric=1 store=active"), ct);
+        if (!ok && !output.Contains("already exists", StringComparison.OrdinalIgnoreCase))
+        {
+            _state.HostRoutes.Remove(route);
+            SaveState();
+            _log($"Could not add a route to {device} on {adapter.Name}: {output}");
+            return null;
+        }
+        if (!ok)
+        {
+            _state.HostRoutes.Remove(route); // it existed already: use it, but do not remove it later
+            _state.HostRoutes.Add(route with { Owned = false });
+            SaveState();
+        }
+        _log($"Reaching {device} through a route for that device only, from {source} (its range {block} is public, so the rest of it is left alone).");
+        return source;
+    }
+
+    /// <summary>Is <paramref name="ip"/> a DNS server or gateway of any of the laptop's adapters?</summary>
+    private static bool LaptopUses(IPAddress ip)
+    {
+        try
+        {
+            return NetworkInterface.GetAllNetworkInterfaces().Any(n =>
+            {
+                var p = n.GetIPProperties();
+                return p.DnsAddresses.Contains(ip) || p.GatewayAddresses.Any(g => g.Address.Equals(ip));
+            });
+        }
+        catch (NetworkInformationException) { return false; }
+    }
+
+    private async Task<IPAddress?> AddAsync(Adapter adapter, Subnet subnet, string mask, ISet<IPAddress> avoid, IPAddress? near, CancellationToken ct)
     {
         if (!OperatingSystem.IsWindows()) { _log("Adding addresses is only supported on Windows."); return null; }
 
@@ -84,10 +167,9 @@ public sealed class TempAddressManager : IAddressJoiner
             }
         }
 
-        foreach (var candidate in Candidates(subnet).Where(c => !avoid.Contains(c)).Take(6))
+        foreach (var candidate in Candidates(subnet, near).Where(c => !avoid.Contains(c)).Take(6))
         {
             ct.ThrowIfCancellationRequested();
-            var mask = subnet.MaskAddress.ToString();
             var entry = new AddedAddress(adapter.Name, candidate.ToString(), mask);
             _state.Addresses.Add(entry);
             SaveState();
@@ -109,7 +191,7 @@ public sealed class TempAddressManager : IAddressJoiner
                 Remove(entry);
                 continue;
             }
-            _log($"Joined {subnet} as {candidate} (temporary).");
+            _log(mask == "255.255.255.255" ? $"Added {candidate} (temporary, this address only)." : $"Joined {subnet} as {candidate} (temporary).");
             return candidate;
         }
         return null;
@@ -193,6 +275,14 @@ public sealed class TempAddressManager : IAddressJoiner
     public void RemoveAll()
     {
         EndWebSession(addressesGoing: true);
+        foreach (var r in _state.HostRoutes.ToList())
+        {
+            if (!r.Owned) { _state.HostRoutes.Remove(r); SaveState(); continue; }
+            var (ok, output) = Netsh($"interface ipv4 delete route prefix={r.Target}/32 interface=\"{r.AdapterName}\" nexthop=0.0.0.0 store=active");
+            if (!ok && !NotFound(output)) _log($"Could not remove the route to {r.Target}: {output}");
+            _state.HostRoutes.Remove(r);
+            SaveState();
+        }
         foreach (var a in _state.Addresses.ToList()) Remove(a);
         foreach (var name in _state.CoexistenceEnabledOn.ToList())
         {
@@ -206,7 +296,7 @@ public sealed class TempAddressManager : IAddressJoiner
     /// <summary>Call at start-up: undoes changes left behind by a crash or power loss.</summary>
     public int CleanupLeftovers()
     {
-        int n = _state.Addresses.Count + _state.CoexistenceEnabledOn.Count + _state.MainAddresses.Count + _state.Routes.Count;
+        int n = _state.Addresses.Count + _state.CoexistenceEnabledOn.Count + _state.MainAddresses.Count + _state.Routes.Count + _state.HostRoutes.Count;
         if (n > 0)
         {
             _log($"Removing {n} leftover network change(s) from a previous run.");
@@ -245,8 +335,31 @@ public sealed class TempAddressManager : IAddressJoiner
         return ok;
     }
 
-    /// <summary>Candidate addresses from the top of the subnet down, avoiding the very last address (.254 is often a gateway).</summary>
-    public static IEnumerable<IPAddress> Candidates(Subnet subnet)
+    /// <summary>
+    /// Candidate addresses. With <paramref name="near"/> (the device to reach), first the top of the /26 around it,
+    /// then of the /27 and /28: whatever the device's own mask (/24 down to /28), the laptop then sits inside the
+    /// device's subnet and the device answers it directly instead of sending the reply to its gateway. Then the top of
+    /// the whole subnet down, avoiding the very last address (.254 is often a gateway).
+    /// </summary>
+    public static IEnumerable<IPAddress> Candidates(Subnet subnet, IPAddress? near = null)
+    {
+        var seen = new HashSet<uint>();
+        if (near != null && subnet.Contains(near) && !Ipv4.IsLinkLocal(subnet.NetworkAddress) && subnet.Prefix < 28)
+        {
+            uint dev = Ipv4.ToUInt(near);
+            foreach (int prefix in new[] { 26, 27, 28 })
+            {
+                if (prefix <= subnet.Prefix) continue;
+                var block = Subnet.Of(near, prefix);
+                for (uint a = block.Broadcast - 1, n = 0; a > block.Network && n < 4; a--)
+                    if (a != dev && seen.Add(a)) { n++; yield return Ipv4.FromUInt(a); }
+            }
+        }
+        foreach (var c in WholeRange(subnet))
+            if (seen.Add(Ipv4.ToUInt(c))) yield return c;
+    }
+
+    private static IEnumerable<IPAddress> WholeRange(Subnet subnet)
     {
         if (Ipv4.IsLinkLocal(subnet.NetworkAddress))
         {

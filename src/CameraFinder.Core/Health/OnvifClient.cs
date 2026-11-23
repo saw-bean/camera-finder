@@ -61,7 +61,27 @@ public sealed class OnvifClient : IOnvifClient
         var log = await CallAsync(http, url,
             "<tds:GetSystemLog xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\"><tds:LogType>System</tds:LogType></tds:GetSystemLog>", login, clock, ct);
         report.SystemLog = log.Doc == null ? null : ReadSystemLog(log.Doc);
-        if (report.SystemLog == null) report.Unsupported.Add("The camera does not share its system log over ONVIF");
+        if (log.AuthFailed && login is { IsEmpty: false })
+        {
+            // GetDeviceInformation worked with this login, so it is right - but its user level is too low for the log.
+            report.LoginLevelTooLow = true;
+            report.Unsupported.Add("The login's user level is too low to read the system log (an administrator login can)");
+        }
+        else if (report.SystemLog == null) report.Unsupported.Add("The camera does not share its system log over ONVIF");
+
+        // 3b. The camera's own network settings: address, mask, gateway, DHCP, NTP servers, link, services.
+        var nics = await CallAsync(http, url, Device("GetNetworkInterfaces"), login, clock, ct);
+        if (nics.Doc != null) report.Network = ReadNetworkInterfaces(nics.Doc, camera);
+        if (report.Network is { } net)
+        {
+            var gw = await CallAsync(http, url, Device("GetNetworkDefaultGateway"), login, clock, ct);
+            if (gw.Doc != null) net.Gateways.AddRange(ReadGateways(gw.Doc));
+            var ntp = await CallAsync(http, url, Device("GetNTP"), login, clock, ct);
+            if (ntp.Doc != null) ReadNtp(ntp.Doc, net);
+        }
+        else report.Unsupported.Add("The camera did not share its network settings over ONVIF");
+        var protocols = await CallAsync(http, url, Device("GetNetworkProtocols"), login, clock, ct);
+        if (protocols.Doc != null) foreach (var (name, on, servicePort) in ReadProtocols(protocols.Doc)) report.Protocols.TryAdd(name, (on, servicePort));
 
         // 4. Media service: profiles and the stream address.
         var caps = await CallAsync(http, url,
@@ -256,10 +276,67 @@ public sealed class OnvifClient : IOnvifClient
             var enc = Child(p, "VideoEncoderConfiguration");
             var res = Child(enc, "Resolution");
             var rate = Child(enc, "RateControl");
+            int? gov = OptNum(Child(enc, "H264"), "GovLength") ?? OptNum(Child(enc, "MPEG4"), "GovLength") ?? OptNum(enc, "GovLength");
             yield return new OnvifProfile(token, Child(p, "Name")?.Value.Trim(), Child(enc, "Encoding")?.Value.Trim(),
-                OptNum(res, "Width"), OptNum(res, "Height"), OptNum(rate, "FrameRateLimit"), OptNum(rate, "BitrateLimit"));
+                OptNum(res, "Width"), OptNum(res, "Height"), OptNum(rate, "FrameRateLimit"), OptNum(rate, "BitrateLimit"), gov);
         }
     }
+
+    /// <summary>
+    /// GetNetworkInterfaces: the interface that carries <paramref name="camera"/> (else the first enabled one) - its
+    /// IPv4 address and prefix (manual or from DHCP), whether DHCP is on, the negotiated link and MTU.
+    /// </summary>
+    public static OnvifNetwork? ReadNetworkInterfaces(XDocument doc, IPAddress camera)
+    {
+        var nics = doc.Descendants().Where(e => e.Name.LocalName == "NetworkInterfaces").ToList();
+        if (nics.Count == 0) return null;
+        OnvifNetwork Parse(XElement nic)
+        {
+            var n = new OnvifNetwork();
+            var v4 = Child(nic, "IPv4");
+            var cfg = Child(v4, "Config");
+            n.Dhcp = Bool(Child(cfg, "DHCP"));
+            var addr = n.Dhcp == true ? Child(cfg, "FromDHCP") ?? Child(cfg, "Manual") : Child(cfg, "Manual") ?? Child(cfg, "FromDHCP");
+            if (IPAddress.TryParse(Child(addr, "Address")?.Value.Trim(), out var ip)) n.Address = ip;
+            n.Prefix = OptNum(addr, "PrefixLength");
+            var oper = Child(Child(nic, "Link"), "OperSettings") ?? Child(Child(nic, "Link"), "AdminSettings");
+            n.LinkSpeedMbps = OptNum(oper, "Speed");
+            n.Duplex = Child(oper, "Duplex")?.Value.Trim().ToLowerInvariant() switch { "full" => "full", "half" => "half", _ => null };
+            n.AutoNegotiation = Bool(Child(Child(Child(nic, "Link"), "AdminSettings"), "AutoNegotiation"));
+            n.Mtu = OptNum(Child(nic, "Info"), "MTU");
+            return n;
+        }
+        var parsed = nics.Select(Parse).ToList();
+        return parsed.FirstOrDefault(n => camera.Equals(n.Address)) ?? parsed.FirstOrDefault(n => n.Address != null) ?? parsed[0];
+    }
+
+    public static IEnumerable<IPAddress> ReadGateways(XDocument doc) =>
+        doc.Descendants().Where(e => e.Name.LocalName == "IPv4Address")
+            .Select(e => IPAddress.TryParse(e.Value.Trim(), out var a) ? a : null)
+            .Where(a => a != null && !a.Equals(IPAddress.Any)).Select(a => a!);
+
+    /// <summary>GetNTP: whether the servers come from DHCP, and the servers in use (from DHCP or set by hand).</summary>
+    public static void ReadNtp(XDocument doc, OnvifNetwork net)
+    {
+        var info = doc.Descendants().FirstOrDefault(e => e.Name.LocalName == "NTPInformation");
+        if (info == null) return;
+        net.NtpFromDhcp = Bool(Child(info, "FromDHCP"));
+        var lists = info.Elements().Where(e => e.Name.LocalName is "NTPManual" or "NTPFromDHCP")
+            .OrderBy(e => (e.Name.LocalName == "NTPFromDHCP") == (net.NtpFromDhcp == true) ? 0 : 1);
+        foreach (var server in lists)
+        {
+            string? v = (Child(server, "IPv4Address") ?? Child(server, "DNSname") ?? Child(server, "IPv6Address"))?.Value.Trim();
+            if (!string.IsNullOrEmpty(v) && v != "0.0.0.0" && !net.NtpServers.Contains(v)) net.NtpServers.Add(v);
+        }
+    }
+
+    /// <summary>GetNetworkProtocols: (HTTP, true, 80), (RTSP, true, 554)...</summary>
+    public static IEnumerable<(string Name, bool Enabled, int? Port)> ReadProtocols(XDocument doc) =>
+        doc.Descendants().Where(e => e.Name.LocalName == "NetworkProtocols")
+            .Select(p => (Child(p, "Name")?.Value.Trim() ?? "", Bool(Child(p, "Enabled")) ?? true, OptNum(p, "Port")))
+            .Where(p => p.Item1.Length > 0);
+
+    private static bool? Bool(XElement? e) => e?.Value.Trim().ToLowerInvariant() switch { "true" or "1" => true, "false" or "0" => false, _ => null };
 
     private static XElement? Child(XElement? e, string local) => e?.Elements().FirstOrDefault(c => c.Name.LocalName == local);
     private static string? Text(XDocument d, string local) =>

@@ -12,7 +12,7 @@ public enum WebPageStatus
     NeedsTemporaryAddress,
     /// <summary>Adding a temporary address in the device's range failed (e.g. no admin rights, all candidates in use).</summary>
     JoinFailed,
-    /// <summary>The device is in a public range; the app never adds addresses there.</summary>
+    /// <summary>Not a usable device address (0.0.0.0, broadcast, multicast, loopback).</summary>
     NotJoinable,
     /// <summary>Reachable, but nothing answers on 80/443/8080.</summary>
     NoWebPage,
@@ -23,19 +23,21 @@ public sealed record WebPageResult(WebPageStatus Status, string? Url = null, Sub
     IPAddress? Source = null);
 
 /// <summary>
-/// "Open web page" for any device in the list, even one in a range the laptop is not in: if needed, adds a temporary
-/// (virtual) address in the device's range, re-checks its ports, and returns the page address.
+/// "Open web page" for any device in the list, whatever range it is in: if needed, adds a temporary (virtual) address
+/// on the scan adapter - in the device's range for private and link-local ranges, or an address plus a route for that
+/// one device in public-looking ranges, so the laptop's internet traffic is left alone - re-checks its ports, and
+/// returns the page address.
 /// </summary>
 public sealed class WebPageAccess
 {
     private readonly IAddressJoiner? _joiner;
     private readonly Func<Adapter?> _adapter;
-    private readonly Func<Device, CancellationToken, Task> _readDetails;
+    private readonly Func<Device, IPAddress?, CancellationToken, Task> _readDetails;
 
     /// <param name="joiner">Adds temporary addresses (null = not possible, e.g. not Windows).</param>
     /// <param name="currentAdapter">The scan adapter as it is now (including temporary addresses already added).</param>
-    /// <param name="readDetails">Checks ports and reads the page title (DeviceEnricher in the app).</param>
-    public WebPageAccess(IAddressJoiner? joiner, Func<Adapter?> currentAdapter, Func<Device, CancellationToken, Task> readDetails)
+    /// <param name="readDetails">Checks ports and reads the page title (DeviceEnricher in the app), connecting from the given laptop address.</param>
+    public WebPageAccess(IAddressJoiner? joiner, Func<Adapter?> currentAdapter, Func<Device, IPAddress?, CancellationToken, Task> readDetails)
     {
         _joiner = joiner;
         _adapter = currentAdapter;
@@ -50,13 +52,15 @@ public sealed class WebPageAccess
     {
         var adapter = _adapter();
         var range = Reach.RangeFor(ip);
-        var source = adapter == null ? null : Reach.SourceFor(adapter.Addresses, ip);
+        var source = adapter == null ? null : Reach.SourceFor(adapter, ip);
         if (source != null) return new WebPageResult(WebPageStatus.Ready, Range: range, Source: source);
 
-        if (!Reach.MayJoin(ip)) return new WebPageResult(WebPageStatus.NotJoinable, Range: range);
+        if (!Ipv4.IsUsableHost(ip)) return new WebPageResult(WebPageStatus.NotJoinable, Range: range);
         if (!mayJoin) return new WebPageResult(WebPageStatus.NeedsTemporaryAddress, Range: range);
         if (_joiner == null || adapter == null) return new WebPageResult(WebPageStatus.JoinFailed, Range: range);
-        var added = await _joiner.AddFreeAddressAsync(adapter, range, avoid, ct);
+        var added = Reach.NeedsHostRoute(ip)
+            ? await _joiner.AddHostRouteAsync(adapter, ip, avoid, ct)
+            : await _joiner.AddFreeAddressAsync(adapter, range, avoid, ct, near: ip);
         return added == null
             ? new WebPageResult(WebPageStatus.JoinFailed, Range: range)
             : new WebPageResult(WebPageStatus.Ready, Range: range, TemporaryAddress: added, Source: added);
@@ -72,7 +76,7 @@ public sealed class WebPageAccess
         var added = reach.TemporaryAddress;
 
         // Check again even when a URL is known: the page may only now be reachable, or may have moved port.
-        if (added != null || device.WebUrl == null) await _readDetails(device, ct);
+        if (added != null || device.WebUrl == null) await _readDetails(device, reach.Source, ct);
         return device.WebUrl != null
             ? new WebPageResult(WebPageStatus.Ready, device.WebUrl, range, added, reach.Source)
             : new WebPageResult(WebPageStatus.NoWebPage, Range: range, TemporaryAddress: added, Source: reach.Source);

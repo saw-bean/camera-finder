@@ -1,12 +1,15 @@
 using System.Globalization;
+using System.Net;
 using System.Text.Json;
+using CameraFinder.Core.Net;
 
 namespace CameraFinder.Core.Health;
 
 public interface IStreamProber
 {
     /// <param name="url">RTSP address, without the login (it is added here).</param>
-    Task<StreamReport> ProbeAsync(string url, Credentials? login, TimeSpan watch, CancellationToken ct);
+    /// <param name="source">Laptop address to connect from (the temporary address in the camera's range), or null.</param>
+    Task<StreamReport> ProbeAsync(string url, Credentials? login, TimeSpan watch, CancellationToken ct, IPAddress? source = null);
 }
 
 /// <summary>
@@ -19,10 +22,15 @@ public sealed class FfprobeStreamProber : IStreamProber
     private readonly string _ffprobe;
     public FfprobeStreamProber(string ffprobePath) => _ffprobe = ffprobePath;
 
-    public async Task<StreamReport> ProbeAsync(string url, Credentials? login, TimeSpan watch, CancellationToken ct)
+    public async Task<StreamReport> ProbeAsync(string url, Credentials? login, TimeSpan watch, CancellationToken ct, IPAddress? source = null)
     {
         var report = new StreamReport { Url = Redact(url) };
-        var args = Arguments(WithLogin(url, login), watch);
+        // ffprobe cannot choose the address it connects from; through a temporary address it goes via a local relay
+        // that connects from that address.
+        await using var relay = source != null && Uri.TryCreate(url, UriKind.Absolute, out var u) && IPAddress.TryParse(u.Host, out var host)
+            ? new TcpRelay(new IPEndPoint(host, u.Port > 0 ? u.Port : 554), source)
+            : null;
+        var args = Arguments(WithLogin(relay?.Rewrite(url) ?? url, login), watch);
         ProcessResult r;
         try { r = await ProcessRunner.RunAsync(_ffprobe, args, watch + TimeSpan.FromSeconds(15), ct); }
         catch (System.ComponentModel.Win32Exception ex) { report.Error = "ffprobe could not start: " + ex.Message; return report; }
@@ -153,7 +161,7 @@ public sealed class FfprobeStreamProber : IStreamProber
 /// <summary>Usual RTSP addresses by brand, for cameras that do not report one over ONVIF.</summary>
 public static class RtspPaths
 {
-    public static string? Guess(string ip, string? vendor, string? description)
+    public static string? Guess(string ip, string? vendor, string? description, int port = 554)
     {
         string v = ((vendor ?? "") + " " + (description ?? "")).ToLowerInvariant();
         string path =
@@ -167,6 +175,6 @@ public static class RtspPaths
             : v.Contains("uniview") ? "/media/video1"
             : v.Contains("avigilon") ? "/defaultPrimary?streamType=u"
             : "";
-        return path.Length == 0 ? null : $"rtsp://{ip}:554{path}";
+        return path.Length == 0 ? null : $"rtsp://{ip}:{port}{path}";
     }
 }

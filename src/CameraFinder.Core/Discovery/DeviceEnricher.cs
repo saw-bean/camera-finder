@@ -1,8 +1,11 @@
+using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
 using CameraFinder.Core.Model;
+using CameraFinder.Core.Net;
 
 namespace CameraFinder.Core.Discovery;
 
@@ -15,33 +18,36 @@ public sealed class DeviceEnricher : IDisposable
     /// <summary>80/443 web page, 554 RTSP video (cameras/recorders), 8080 alternate web, 8000 common camera SDK port.</summary>
     public static readonly int[] Ports = { 80, 443, 554, 8000, 8080 };
 
-    private readonly HttpClient _http;
+    // One client per laptop address to send from (null = the laptop's normal address).
+    private readonly ConcurrentDictionary<string, HttpClient> _clients = new();
 
-    public DeviceEnricher()
+    private HttpClient ClientFor(IPAddress? source) => _clients.GetOrAdd(source?.ToString() ?? "", _ =>
     {
-        var handler = new HttpClientHandler
-        {
-            // Devices use self-signed certificates. We only read the page title, never send credentials.
-            ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator,
-            AllowAutoRedirect = true,
-            MaxAutomaticRedirections = 3,
-            UseCookies = false,
-            UseDefaultCredentials = false,
-        };
-        _http = new HttpClient(handler) { Timeout = RequestTimeout };
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd("CameraFinder/1.0");
-    }
+        var handler = BoundSocket.Http(source);
+        // Devices use self-signed certificates. We only read the page title, never send credentials.
+        handler.SslOptions = new SslClientAuthenticationOptions { RemoteCertificateValidationCallback = (_, _, _, _) => true };
+        handler.AllowAutoRedirect = true;
+        handler.MaxAutomaticRedirections = 3;
+        handler.UseCookies = false;
+        handler.UseProxy = false;
+        handler.ConnectTimeout = TimeSpan.FromSeconds(3);
+        var http = new HttpClient(handler) { Timeout = RequestTimeout };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("CameraFinder/1.0");
+        return http;
+    });
 
-    public async Task EnrichAsync(Device d, string? ssdpDescriptionUrl, CancellationToken ct)
+    /// <param name="source">The laptop address to connect from: the temporary address in the device's range, if any.</param>
+    public async Task EnrichAsync(Device d, string? ssdpDescriptionUrl, CancellationToken ct, IPAddress? source = null)
     {
-        var open = await OpenPortsAsync(d.Ip, Ports, TimeSpan.FromMilliseconds(900), ct);
+        var http = ClientFor(source);
+        var open = await OpenPortsAsync(d.Ip, Ports, TimeSpan.FromMilliseconds(900), ct, source);
         lock (d) foreach (var p in open) d.OpenPorts.Add(p);
 
         string? url = PickWebUrl(d.Ip, open);
         if (url != null)
         {
             d.WebUrl = url;
-            var (title, server) = await ReadPageAsync(url, ct);
+            var (title, server) = await ReadPageAsync(http, url, ct);
             d.WebTitle ??= title;
             d.Server ??= server;
         }
@@ -51,7 +57,7 @@ public sealed class DeviceEnricher : IDisposable
         {
             try
             {
-                string xml = await GetLimitedAsync(ssdpDescriptionUrl, 64 * 1024, ct);
+                string xml = await GetLimitedAsync(http, ssdpDescriptionUrl, 64 * 1024, ct);
                 var (name, mfr, model) = SsdpProbe.ParseDescription(xml);
                 d.Name ??= name;
                 d.Model ??= model;
@@ -69,11 +75,11 @@ public sealed class DeviceEnricher : IDisposable
         return null;
     }
 
-    public static async Task<List<int>> OpenPortsAsync(IPAddress ip, IEnumerable<int> ports, TimeSpan timeout, CancellationToken ct)
+    public static async Task<List<int>> OpenPortsAsync(IPAddress ip, IEnumerable<int> ports, TimeSpan timeout, CancellationToken ct, IPAddress? source = null)
     {
         var checks = ports.Select(async port =>
         {
-            using var client = new TcpClient(AddressFamily.InterNetwork);
+            using var client = BoundSocket.Tcp(source);
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(timeout);
             try
@@ -93,14 +99,14 @@ public sealed class DeviceEnricher : IDisposable
     /// </summary>
     public static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
 
-    private async Task<(string? Title, string? Server)> ReadPageAsync(string url, CancellationToken ct)
+    private static async Task<(string? Title, string? Server)> ReadPageAsync(HttpClient http, string url, CancellationToken ct)
     {
         try
         {
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
             limit.CancelAfter(RequestTimeout);
             ct = limit.Token;
-            using var resp = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+            using var resp = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
             string? server = resp.Headers.Server.Count > 0 ? resp.Headers.Server.ToString() : null;
             string html = await ReadLimitedAsync(resp, 64 * 1024, ct);
             return (ExtractTitle(html), server);
@@ -108,12 +114,12 @@ public sealed class DeviceEnricher : IDisposable
         catch { return (null, null); }
     }
 
-    private async Task<string> GetLimitedAsync(string url, int max, CancellationToken ct)
+    private static async Task<string> GetLimitedAsync(HttpClient http, string url, int max, CancellationToken ct)
     {
         using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
         limit.CancelAfter(RequestTimeout);
         ct = limit.Token;
-        using var resp = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+        using var resp = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
         return await ReadLimitedAsync(resp, max, ct);
     }
 
@@ -150,5 +156,5 @@ public sealed class DeviceEnricher : IDisposable
 
     private static readonly Regex WhitespaceRun = new(@"\s+", RegexOptions.Compiled);
 
-    public void Dispose() => _http.Dispose();
+    public void Dispose() { foreach (var c in _clients.Values) c.Dispose(); }
 }

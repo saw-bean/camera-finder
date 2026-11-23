@@ -1,3 +1,4 @@
+using CameraFinder.Core.Net;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -259,6 +260,47 @@ static partial class Tests
             Assert.True(rep.Opened, $"[{auth}] ffprobe: {rep.Error}");
             Assert.Equal(1280, rep.Width);
             Assert.True(rep.MeasuredFps is > 20 and < 30, $"[{auth}] ffprobe fps {rep.MeasuredFps}");
+
+            // The same through the relay used for cameras reached from a temporary address (login digest and all).
+            var relayed = await new FfprobeStreamProber(ffprobe).ProbeAsync(url, new Credentials("admin", "secret"), TimeSpan.FromSeconds(5), CancellationToken.None,
+                source: IPAddress.Loopback);
+            Assert.True(relayed.Opened, $"[{auth}] ffprobe through the relay: {relayed.Error}");
+            Assert.Equal(1280, relayed.Width);
+            Assert.True(relayed.Url.Contains("8554") && !relayed.Url.Contains("secret"), "the report shows the camera's address, without the password: " + relayed.Url);
         }
+    }
+
+    public static async Task TestTcpRelayCopiesBothWaysFromTheGivenAddress()
+    {
+        var server = new TcpListener(IPAddress.Loopback, 0);
+        server.Start();
+        var target = (IPEndPoint)server.LocalEndpoint;
+        IPEndPoint? seenFrom = null;
+        var echo = Task.Run(async () =>
+        {
+            using var c = await server.AcceptTcpClientAsync();
+            seenFrom = (IPEndPoint?)c.Client.RemoteEndPoint;
+            var st = c.GetStream();
+            var buf = new byte[64];
+            int n = await st.ReadAsync(buf);
+            await st.WriteAsync(buf.AsMemory(0, n).ToArray().Reverse().ToArray());
+        });
+        await using (var relay = new TcpRelay(target, IPAddress.Loopback))
+        {
+            Assert.Equal($"rtsp://127.0.0.1:{relay.LocalPort}/Streaming/Channels/101?x=1", relay.Rewrite("rtsp://10.0.5.21:554/Streaming/Channels/101?x=1"));
+            using var client = new TcpClient();
+            await client.ConnectAsync(IPAddress.Loopback, relay.LocalPort);
+            var st = client.GetStream();
+            await st.WriteAsync(Encoding.ASCII.GetBytes("abc"));
+            var buf = new byte[3];
+            int got = 0;
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            while (got < 3) got += await st.ReadAsync(buf.AsMemory(got), cts.Token);
+            Assert.Equal("cba", Encoding.ASCII.GetString(buf));
+            Assert.Equal(1, relay.Connections);
+        }
+        await echo;
+        server.Stop();
+        Assert.True(seenFrom?.Address.Equals(IPAddress.Loopback) == true, "connected from the given address");
     }
 }
