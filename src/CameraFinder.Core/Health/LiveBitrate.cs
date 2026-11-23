@@ -32,11 +32,16 @@ public sealed class LiveStats
     public double LossPercent => _packets == 0 ? 0 : 100.0 * _lost / (_packets + _lost);
     public double LongestGap => _longestGapMs / 1000.0;
 
-    /// <summary>Average seconds between key frames, once two have been seen.</summary>
+    /// <summary>
+    /// Average seconds between key frames, once two have been seen. Taken from the camera's own frame timestamps
+    /// (RTP) when there are any, so a network that delays or bunches frames does not change it; otherwise from when
+    /// the key frames arrived.
+    /// </summary>
     public double? KeyframeInterval
     {
         get
         {
+            if (Delay.KeyframeInterval() is { } fromCamera) return fromCamera;
             lock (_keyFrames)
                 return _keyFrames.Count < 2 ? null : (_keyFrames[^1] - _keyFrames[0]).TotalSeconds / (_keyFrames.Count - 1);
         }
